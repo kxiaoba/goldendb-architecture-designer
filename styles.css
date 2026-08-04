@@ -364,6 +364,10 @@ select:focus {
     #0a1512;
 }
 
+.business-topology {
+  min-height: 700px;
+}
+
 .reverse-topology-board {
   position: relative;
   z-index: 1;
@@ -432,7 +436,8 @@ select:focus {
 }
 
 .reverse-server-section,
-.reverse-tenant-map {
+.reverse-tenant-map,
+.reverse-tenant-chain-section {
   border: 1px solid #25463d;
   background: rgba(8, 17, 15, 0.62);
   padding: 12px;
@@ -496,6 +501,91 @@ select:focus {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 9px;
+}
+
+.tenant-chain-list {
+  display: grid;
+  gap: 10px;
+}
+
+.tenant-chain-card {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.8fr) auto minmax(120px, 1fr) auto minmax(180px, 1.6fr) auto minmax(120px, 1fr);
+  gap: 8px;
+  align-items: stretch;
+  border: 1px solid #34584c;
+  background: rgba(13, 24, 21, 0.9);
+  padding: 10px;
+}
+
+.tenant-chain-root,
+.tenant-chain-group {
+  border: 1px solid #2d4f44;
+  background: rgba(8, 17, 15, 0.72);
+  padding: 8px;
+  min-width: 0;
+}
+
+.tenant-chain-root strong {
+  display: block;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.tenant-chain-root small,
+.tenant-chain-group small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.tenant-chain-arrow {
+  align-self: center;
+  color: var(--teal);
+  font-size: 10px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.tenant-chain-group b {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.tenant-chain-group div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tenant-chain-group span,
+.tenant-chain-more {
+  border: 1px solid #34584c;
+  background: rgba(8, 17, 15, 0.74);
+  color: #e7f4ee;
+  padding: 4px 6px;
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.tenant-chain-group.cn {
+  border-color: var(--teal);
+}
+
+.tenant-chain-group.dn {
+  border-color: var(--accent);
+}
+
+.tenant-chain-group.gtm {
+  border-color: var(--warn);
+}
+
+.tenant-chain-more {
+  color: var(--muted);
 }
 
 .site {
@@ -564,6 +654,98 @@ select:focus {
 
 .node.mgr {
   border-color: var(--blue);
+}
+
+.business-site {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  overflow: hidden;
+}
+
+.site-tenant-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: start;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.site-tenant-strip span {
+  border: 1px solid #294239;
+  background: rgba(8, 17, 15, 0.72);
+  color: #dfeee7;
+  padding: 4px 6px;
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.business-ha-matrix {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 14px;
+  z-index: 3;
+  border: 1px solid #25463d;
+  background: rgba(8, 17, 15, 0.92);
+  padding: 10px;
+}
+
+.business-ha-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.business-ha-head strong {
+  color: #e9f8f0;
+  font-size: 13px;
+}
+
+.business-ha-head span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.business-ha-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.business-ha-tenant {
+  border: 1px solid #34584c;
+  background: rgba(13, 24, 21, 0.9);
+  padding: 8px;
+  min-width: 0;
+}
+
+.business-ha-tenant div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.business-ha-tenant strong {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.business-ha-tenant span,
+.business-ha-tenant small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.business-ha-tenant p {
+  margin: 0 0 5px;
+  color: #e7f4ee;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .link-layer {
@@ -1140,6 +1322,22 @@ a {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .business-topology {
+    min-height: 900px;
+  }
+
+  .business-ha-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tenant-chain-card {
+    grid-template-columns: 1fr;
+  }
+
+  .tenant-chain-arrow {
+    text-align: left;
+  }
+
   .relation-arrow {
     display: none;
   }
@@ -1174,11 +1372,21 @@ a {
     min-height: 760px;
   }
 
+  .business-topology {
+    min-height: 1080px;
+  }
+
+  .business-ha-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .tenant-grid,
   .tenant-resource-grid,
   .reverse-card-grid,
   .server-row,
-  .reverse-server-grid {
+  .reverse-server-grid,
+  .tenant-chain-card {
     grid-template-columns: 1fr;
   }
 
