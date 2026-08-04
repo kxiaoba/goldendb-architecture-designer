@@ -119,12 +119,12 @@ const defaults = {
 };
 
 const defaultBusinessTenants = [
-  { name: "租户1", type: "distributed", qps: 100000, dataTb: 3, minShards: 2 }
+  { name: "租户1", type: "distributed", qps: 100000, dataTb: 3, minShards: 2, cnCores: 8, cnMemoryGb: 16, dnCores: 16, dnMemoryGb: 64 }
 ];
 
 const defaultReverseTenants = [
-  { name: "租户1", type: "distributed", cnPerAz: 2, shardCount: 4, replicaCount: 4 },
-  { name: "租户2", type: "distributed", cnPerAz: 2, shardCount: 2, replicaCount: 4 }
+  { name: "租户1", type: "distributed", cnPerAz: 2, shardCount: 4, replicaCount: 4, cnCores: 8, cnMemoryGb: 16, dnCores: 16, dnMemoryGb: 64 },
+  { name: "租户2", type: "distributed", cnPerAz: 2, shardCount: 2, replicaCount: 4, cnCores: 8, cnMemoryGb: 16, dnCores: 16, dnMemoryGb: 64 }
 ];
 
 let businessTenantSpecs = cloneTenantSpecs(defaultBusinessTenants);
@@ -185,11 +185,13 @@ function calculate() {
     specs: businessTenantSpecs,
     sqlPerTxn,
     cnSingleNodeTps,
+    cpuLimit,
     growthPower,
     maxShardTb,
     globalMinShards,
     safeShardTps,
     replicasPerShard,
+    azCount,
     forceEven
   });
   const businessTenants = tenantPlans.length;
@@ -299,7 +301,8 @@ function calculateReverse() {
   const tenantPlans = buildReverseTenantPlans({
     specs: reverseTenantSpecs,
     environment,
-    minReplica
+    minReplica,
+    azCount
   });
   const businessTenants = tenantPlans.length;
   const distributedTenants = tenantPlans.filter((tenant) => tenant.isDistributed).length;
@@ -318,6 +321,14 @@ function calculateReverse() {
   const gtmPerPrimaryAz = distributedTenants > 0 ? Math.max(1, Math.ceil(gtmNodes / Math.max(1, azCount - 1))) : 0;
   const usedSlots = totalCn + actualDnInstances + gtmNodes + managementNodes;
   const usableServerCount = Math.max(1, Math.floor(serverCount * (1 - reserveRatio)));
+  const cpuDemandCores = tenantPlans.reduce(
+    (sum, tenant) => sum + tenant.cnCpuDemand + tenant.dnCpuDemand,
+    0
+  ) + gtmNodes * 4 + managementNodes * 4;
+  const memoryDemandGb = tenantPlans.reduce(
+    (sum, tenant) => sum + tenant.cnMemoryDemand + tenant.dnMemoryDemand,
+    0
+  ) + gtmNodes * 8 + managementNodes * 8;
   const componentSizing = calculateComponentServerCounts({
     environment,
     requestedComponentLayout,
@@ -329,7 +340,11 @@ function calculateReverse() {
     maxCnPerServer,
     maxDnPerServer,
     storedDataTb: 0,
-    usableDiskTb: Math.max(0.1, diskTb * (1 - reserveRatio))
+    usableDiskTb: Math.max(0.1, diskTb * (1 - reserveRatio)),
+    cpuDemandCores,
+    memoryDemandGb,
+    usableCpuCores: Math.max(1, Math.floor(cpuCores * (1 - reserveRatio))),
+    usableMemoryGb: Math.max(1, Math.floor(memoryGb * (1 - reserveRatio)))
   });
   const allowColocation = componentSizing.effectiveLayout !== "dedicated" && componentSizing.effectiveLayout !== "gtmMgrMixed";
   const requiredDedicatedServers = componentSizing.dedicatedServers;
@@ -374,6 +389,8 @@ function calculateReverse() {
     memoryGb,
     diskTb,
     reserveRatio,
+    cpuDemandCores,
+    memoryDemandGb,
     requestedComponentLayout,
     componentLayout: componentSizing.effectiveLayout,
     componentLayoutLabel: componentSizing.effectiveLabel,
@@ -465,6 +482,14 @@ function buildBusinessServerSizing(config) {
     (sum, tenant) => sum + tenant.futureDataTb * tenant.replicasPerShard,
     0
   );
+  const cpuDemandCores = config.tenantPlans.reduce(
+    (sum, tenant) => sum + tenant.cnCpuDemand + tenant.dnCpuDemand,
+    0
+  ) + config.gtmNodes * 4 + config.managementNodes * 4;
+  const memoryDemandGb = config.tenantPlans.reduce(
+    (sum, tenant) => sum + tenant.cnMemoryDemand + tenant.dnMemoryDemand,
+    0
+  ) + config.gtmNodes * 8 + config.managementNodes * 8;
   const profileAdjust = getBusinessProfileAdjust(config.serverProfile);
   const maxCnPerServer = Math.max(1, Math.floor(config.maxCnPerServer * profileAdjust.cn));
   const maxDnPerServer = Math.max(1, Math.floor(config.maxDnPerServer * profileAdjust.dn));
@@ -479,7 +504,26 @@ function buildBusinessServerSizing(config) {
     maxCnPerServer,
     maxDnPerServer,
     storedDataTb,
-    usableDiskTb
+    usableDiskTb,
+    cpuDemandCores,
+    memoryDemandGb,
+    usableCpuCores,
+    usableMemoryGb
+  });
+  const serverPlan = buildServerPlan({
+    serverCount: componentSizing.recommendedServers,
+    azCount: config.azCount,
+    mode: config.mode,
+    environment: config.environment,
+    allowColocation: componentSizing.effectiveLayout !== "dedicated",
+    componentLayout: componentSizing.effectiveLayout,
+    totalCn: config.totalCn,
+    dnInstances: config.dnInstances,
+    tenantPlans: config.tenantPlans,
+    gtmNodes: config.gtmNodes,
+    managementNodes: config.managementNodes,
+    maxDnPerServer,
+    maxCnPerServer
   });
 
   return {
@@ -495,7 +539,10 @@ function buildBusinessServerSizing(config) {
     maxCnPerServer,
     maxDnPerServer,
     storedDataTb,
+    cpuDemandCores,
+    memoryDemandGb,
     ...componentSizing,
+    serverPlan,
     perAzServers: distributeCount(componentSizing.recommendedServers, config.azCount),
     deploymentStyle: componentSizing.effectiveLabel
   };
@@ -517,12 +564,15 @@ function calculateComponentServerCounts(config) {
     Math.ceil((config.totalCn + config.dnInstances + config.gtmNodes + config.managementNodes) / (config.maxCnPerServer + config.maxDnPerServer + 1)),
     dnServersByCapacity
   );
-  const recommendedServers = {
+  const cpuServers = config.cpuDemandCores ? Math.ceil(config.cpuDemandCores / config.usableCpuCores) : 0;
+  const memoryServers = config.memoryDemandGb ? Math.ceil(config.memoryDemandGb / config.usableMemoryGb) : 0;
+  const layoutServers = {
     dedicated: dedicatedServers,
     gtmMgrMixed: gtmMgrMixedServers,
     cnDnMixed: cnDnMixedServers,
     allMixed: allMixedServers
   }[effectiveLayout];
+  const recommendedServers = Math.max(layoutServers, cpuServers, memoryServers);
 
   return {
     effectiveLayout,
@@ -539,6 +589,9 @@ function calculateComponentServerCounts(config) {
     cnDnMixedServers,
     allMixedServers,
     mixedServers: allMixedServers,
+    layoutServers,
+    cpuServers,
+    memoryServers,
     recommendedServers
   };
 }
@@ -583,21 +636,21 @@ function buildServerPlan(config) {
 
   if (config.componentLayout === "gtmMgrMixed") {
     placeGtmManagementMixed(servers, config);
-    placeRoles(servers, "CN", config.totalCn, config.maxCnPerServer);
+    placeTenantCnRoles(servers, config);
     placeDnRoles(servers, config);
   } else if (config.componentLayout === "cnDnMixed") {
     placeRoles(servers, "管理节点", config.managementNodes, 1);
-    placeRoles(servers, "GTM", config.gtmNodes, 1);
+    placeTenantGtmRoles(servers, config, 1);
     placeCnDnMixed(servers, config);
   } else if (config.componentLayout === "allMixed") {
     placeRoles(servers, "管理节点", config.managementNodes, 2);
-    placeRoles(servers, "GTM", config.gtmNodes, 2);
-    placeRoles(servers, "CN", config.totalCn, config.maxCnPerServer);
+    placeTenantGtmRoles(servers, config, 2);
+    placeTenantCnRoles(servers, config);
     placeDnRoles(servers, config);
   } else {
     placeRoles(servers, "管理节点", config.managementNodes, 1);
-    placeRoles(servers, "GTM", config.gtmNodes, 1);
-    placeRoles(servers, "CN", config.totalCn, config.maxCnPerServer);
+    placeTenantGtmRoles(servers, config, 1);
+    placeTenantCnRoles(servers, config);
     placeDnRoles(servers, config);
   }
 
@@ -616,17 +669,60 @@ function placeGtmManagementMixed(servers, config) {
       .sort((a, b) => a.roles.length - b.roles.length || a.dnCount - b.dnCount)[0];
     if (!target) return;
     if (i < config.managementNodes) target.roles.push("管理节点");
-    const remainingGtm = config.gtmNodes - countAllRoles(servers, "GTM");
+    const remainingGtm = config.gtmNodes - countAllMatchingRoles(servers, isGtmRole);
     const gtmToPlace = Math.min(2, Math.max(0, remainingGtm));
     for (let j = 0; j < gtmToPlace; j += 1) {
-      target.roles.push("GTM");
+      target.roles.push(getNextGtmRoleLabel(config, countAllMatchingRoles(servers, isGtmRole)));
     }
   }
 }
 
 function placeCnDnMixed(servers, config) {
-  placeRoles(servers, "CN", config.totalCn, config.maxCnPerServer);
+  placeTenantCnRoles(servers, config);
   placeDnRoles(servers, config);
+}
+
+function placeTenantCnRoles(servers, config) {
+  const tenants = config.tenantPlans && config.tenantPlans.length
+    ? config.tenantPlans
+    : [{ name: "租户", cnPerAz: Math.ceil(config.totalCn / config.azCount) }];
+
+  tenants.forEach((tenant) => {
+    const totalTenantCn = tenant.cnPerAz * config.azCount;
+    for (let i = 0; i < totalTenantCn; i += 1) {
+      const azOffset = i % config.azCount;
+      const candidates = servers
+        .filter((server, index) => index % config.azCount === azOffset)
+        .sort((a, b) => a.cnCount - b.cnCount || a.roles.length - b.roles.length);
+      const target = candidates.find((server) => server.cnCount < config.maxCnPerServer) || candidates[0] || servers[0];
+      if (!target) return;
+      target.roles.push(`${tenant.name}-CN${i + 1}`);
+      target.cnCount += 1;
+    }
+  });
+}
+
+function placeTenantGtmRoles(servers, config, maxPerServer) {
+  for (let i = 0; i < config.gtmNodes; i += 1) {
+    const label = getNextGtmRoleLabel(config, i);
+    const target = servers
+      .slice()
+      .sort((a, b) => countMatchingRole(a, isGtmRole) - countMatchingRole(b, isGtmRole) || a.roles.length - b.roles.length)[0];
+    if (!target) return;
+    if (countMatchingRole(target, isGtmRole) >= maxPerServer) {
+      const fallback = servers.find((server) => countMatchingRole(server, isGtmRole) < maxPerServer) || target;
+      fallback.roles.push(label);
+    } else {
+      target.roles.push(label);
+    }
+  }
+}
+
+function getNextGtmRoleLabel(config, index) {
+  const distributedTenants = (config.tenantPlans || []).filter((tenant) => tenant.isDistributed);
+  if (!distributedTenants.length) return `GTM${index + 1}`;
+  if (distributedTenants.length > 1) return `GTM-SYS${index + 1}`;
+  return `${distributedTenants[0].name}-GTM${index + 1}`;
 }
 
 function getAzNames(mode, azCount) {
@@ -662,7 +758,7 @@ function placeDnRoles(servers, config) {
     for (let group = 1; group <= tenant.shardCount; group += 1) {
       for (let replica = 1; replica <= tenant.replicasPerShard; replica += 1) {
         const role = replica === 1 ? "Master" : "Slave";
-        const label = `DN ${tenant.name}-G${group}-${role}`;
+        const label = `${tenant.name}-DN-G${group}-${role}`;
         const azOffset = (group + replica - 2) % config.azCount;
         const candidates = servers
           .filter((server, index) => index % config.azCount === azOffset)
@@ -684,11 +780,31 @@ function countAllRoles(servers, role) {
   return servers.reduce((sum, server) => sum + countRole(server, role), 0);
 }
 
+function countMatchingRole(server, predicate) {
+  return server.roles.filter(predicate).length;
+}
+
+function countAllMatchingRoles(servers, predicate) {
+  return servers.reduce((sum, server) => sum + countMatchingRole(server, predicate), 0);
+}
+
+function isCnRole(role) {
+  return role === "CN" || /-CN\d+$/.test(role);
+}
+
+function isGtmRole(role) {
+  return role === "GTM" || role.startsWith("GTM-") || /-GTM\d+$/.test(role);
+}
+
+function isDnRole(role) {
+  return role.startsWith("DN") || /-DN-G\d+-(Master|Slave\d*|Slave)$/.test(role);
+}
+
 function estimateServerCpu(server, environment) {
   const roleWeight = server.roles.reduce((sum, role) => {
-    if (role === "CN") return sum + 18;
-    if (role.startsWith("DN")) return sum + 16;
-    if (role === "GTM") return sum + 8;
+    if (isCnRole(role)) return sum + 18;
+    if (isDnRole(role)) return sum + 16;
+    if (isGtmRole(role)) return sum + 8;
     return sum + 5;
   }, 0);
   const envReserve = environment === "production" ? 8 : 0;
@@ -772,6 +888,18 @@ function buildBusinessTenantPlans(data) {
       : 1;
     const replicasPerShard = isDistributed ? data.replicasPerShard : Math.min(3, data.replicasPerShard);
     const dnInstances = shardCount * replicasPerShard;
+    const totalTenantCn = cnPerAz * data.azCount;
+    const cnSpec = recommendCnNodeSpec({
+      tenantTxnTps: businessTxnTps,
+      totalTenantCn,
+      cpuLimit: data.cpuLimit
+    });
+    const dnSpec = recommendDnNodeSpec({
+      tenantTxnTps: businessTxnTps,
+      futureDataTb,
+      shardCount,
+      safeShardTps: data.safeShardTps
+    });
 
     return {
       tenantNo,
@@ -785,11 +913,24 @@ function buildBusinessTenantPlans(data) {
       businessTxnTps,
       cnRaw,
       cnPerAz,
+      totalCn: totalTenantCn,
+      cnCores: cnSpec.cores,
+      cnMemoryGb: cnSpec.memoryGb,
+      cnSpecLabel: cnSpec.label,
+      cnSpecReason: cnSpec.reason,
+      cnCpuDemand: totalTenantCn * cnSpec.cores,
+      cnMemoryDemand: totalTenantCn * cnSpec.memoryGb,
       shardByCapacity,
       shardByTps,
       shardCount,
       replicasPerShard,
       dnInstances,
+      dnCores: dnSpec.cores,
+      dnMemoryGb: dnSpec.memoryGb,
+      dnSpecLabel: dnSpec.label,
+      dnSpecReason: dnSpec.reason,
+      dnCpuDemand: dnInstances * dnSpec.cores,
+      dnMemoryDemand: dnInstances * dnSpec.memoryGb,
       masterCount: shardCount,
       slaveCount: shardCount * Math.max(0, replicasPerShard - 1),
       gtmLabel: "待绑定",
@@ -811,6 +952,11 @@ function buildReverseTenantPlans(data) {
       : 1;
     const cnPerAz = Math.max(1, Math.floor(Number(spec.cnPerAz) || 1));
     const dnInstances = shardCount * replicasPerShard;
+    const cnCores = Math.max(1, Number(spec.cnCores) || 8);
+    const cnMemoryGb = Math.max(1, Number(spec.cnMemoryGb) || 16);
+    const dnCores = Math.max(1, Number(spec.dnCores) || 16);
+    const dnMemoryGb = Math.max(1, Number(spec.dnMemoryGb) || 64);
+    const totalTenantCn = cnPerAz * data.azCount;
 
     return {
       tenantNo,
@@ -822,15 +968,93 @@ function buildReverseTenantPlans(data) {
       futureDataTb: 0,
       requestedReplicas,
       cnPerAz,
+      totalCn: totalTenantCn,
+      cnCores,
+      cnMemoryGb,
+      cnCpuDemand: totalTenantCn * cnCores,
+      cnMemoryDemand: totalTenantCn * cnMemoryGb,
       shardCount,
       replicasPerShard,
       dnInstances,
+      dnCores,
+      dnMemoryGb,
+      dnCpuDemand: dnInstances * dnCores,
+      dnMemoryDemand: dnInstances * dnMemoryGb,
       masterCount: shardCount,
       slaveCount: shardCount * Math.max(0, replicasPerShard - 1),
       gtmLabel: "待绑定",
       gtmGroupText: "待绑定"
     };
   });
+}
+
+function recommendCnNodeSpec(data) {
+  const perCnTps = data.tenantTxnTps / Math.max(1, data.totalTenantCn);
+  if (perCnTps <= 800) {
+    return {
+      cores: 8,
+      memoryGb: 16,
+      label: "8C / 16GB",
+      reason: `单 CN 约 ${round(perCnTps)} TPS，适合轻量交易入口`
+    };
+  }
+  if (perCnTps <= 1600) {
+    return {
+      cores: 16,
+      memoryGb: 32,
+      label: "16C / 32GB",
+      reason: `单 CN 约 ${round(perCnTps)} TPS，适合中等并发`
+    };
+  }
+  if (perCnTps <= 3200) {
+    return {
+      cores: 32,
+      memoryGb: 64,
+      label: "32C / 64GB",
+      reason: `单 CN 约 ${round(perCnTps)} TPS，适合高并发 SQL 路由与执行`
+    };
+  }
+  return {
+    cores: 64,
+    memoryGb: 128,
+    label: "64C / 128GB",
+    reason: `单 CN 约 ${round(perCnTps)} TPS，建议高规格并配合压测拆分入口`
+  };
+}
+
+function recommendDnNodeSpec(data) {
+  const perShardTps = data.tenantTxnTps / Math.max(1, data.shardCount);
+  const perShardTb = data.futureDataTb / Math.max(1, data.shardCount);
+  if (perShardTps <= 1000 && perShardTb <= 1) {
+    return {
+      cores: 8,
+      memoryGb: 32,
+      label: "8C / 32GB",
+      reason: `单 Group 约 ${round(perShardTps)} TPS / ${round(perShardTb)}TB，适合轻量分片`
+    };
+  }
+  if (perShardTps <= 2500 && perShardTb <= 2) {
+    return {
+      cores: 16,
+      memoryGb: 64,
+      label: "16C / 64GB",
+      reason: `单 Group 约 ${round(perShardTps)} TPS / ${round(perShardTb)}TB，匹配常规核心分片`
+    };
+  }
+  if (perShardTps <= 5000 && perShardTb <= 4) {
+    return {
+      cores: 32,
+      memoryGb: 128,
+      label: "32C / 128GB",
+      reason: `单 Group 约 ${round(perShardTps)} TPS / ${round(perShardTb)}TB，适合高负载分片`
+    };
+  }
+  return {
+    cores: 64,
+    memoryGb: 256,
+    label: "64C / 256GB",
+    reason: `单 Group 约 ${round(perShardTps)} TPS / ${round(perShardTb)}TB，建议高规格并增加分片压测`
+  };
 }
 
 function applyGtmLabels(tenantPlans, binding, totalGtmNodes = 0) {
@@ -982,6 +1206,22 @@ function renderReverseTenantEditor() {
         <label class="field compact-field">
           <span>每分片副本数</span>
           <input class="tenant-input" data-mode="reverse" data-index="${index}" data-key="replicaCount" type="number" min="1" max="7" value="${tenant.replicaCount}">
+        </label>
+        <label class="field compact-field">
+          <span>CN规格 CPU核</span>
+          <input class="tenant-input" data-mode="reverse" data-index="${index}" data-key="cnCores" type="number" min="1" value="${tenant.cnCores}">
+        </label>
+        <label class="field compact-field">
+          <span>CN规格 内存GB</span>
+          <input class="tenant-input" data-mode="reverse" data-index="${index}" data-key="cnMemoryGb" type="number" min="1" value="${tenant.cnMemoryGb}">
+        </label>
+        <label class="field compact-field">
+          <span>DN规格 CPU核</span>
+          <input class="tenant-input" data-mode="reverse" data-index="${index}" data-key="dnCores" type="number" min="1" value="${tenant.dnCores}">
+        </label>
+        <label class="field compact-field">
+          <span>DN规格 内存GB</span>
+          <input class="tenant-input" data-mode="reverse" data-index="${index}" data-key="dnMemoryGb" type="number" min="1" value="${tenant.dnMemoryGb}">
         </label>
       </div>
     </article>
@@ -1205,6 +1445,8 @@ function renderFormula(data) {
     `副本落盘容量 = SUM(租户规划数据量 × 副本数) = ${round(data.serverSizing.storedDataTb)}TB`,
     `CN 服务器 = CEIL(${data.totalCn} / ${data.serverSizing.maxCnPerServer}) = ${data.serverSizing.cnServers}`,
     `DN 服务器 = Max(CEIL(${data.dnInstances} / ${data.serverSizing.maxDnPerServer}), CEIL(${round(data.serverSizing.storedDataTb)} / 单机可用磁盘)) = ${data.serverSizing.dnServers}`,
+    `租户节点规格资源 = CN/DN CPU ${round(data.serverSizing.cpuDemandCores)} 核、内存 ${round(data.serverSizing.memoryDemandGb)}GB`,
+    `资源口径服务器 = Max(CPU ${data.serverSizing.cpuServers} 台, 内存 ${data.serverSizing.memoryServers} 台)`,
     `GTM 服务器 = ${data.serverSizing.gtmServers}，管理服务器 = ${data.serverSizing.managementServers}`,
     `独立部署 = ${data.serverSizing.dedicatedServers} 台；GTM+管理合设 = ${data.serverSizing.gtmMgrMixedServers} 台；CN+DN混合 = ${data.serverSizing.cnDnMixedServers} 台；全混布 = ${data.serverSizing.allMixedServers} 台`,
     `当前组件组合 = ${data.serverSizing.componentLayoutLabel}；当前推荐 = ${data.serverSizing.recommendedServers} 台`
@@ -1262,6 +1504,7 @@ function renderBusinessServerPlan(data) {
     ["推荐服务器数", `${sizing.recommendedServers} 台 · ${sizing.deploymentStyle}`],
     ["独立部署口径", `${sizing.dedicatedServers} 台：CN ${sizing.cnServers} / DN ${sizing.dnServers} / GTM ${sizing.gtmServers} / 管理 ${sizing.managementServers}`],
     ["推荐混布口径", `GTM+管理 ${sizing.gtmMgrMixedServers} 台 / CN+DN ${sizing.cnDnMixedServers} 台 / 全混布 ${sizing.allMixedServers} 台`],
+    ["规格资源口径", `CPU需求 ${round(sizing.cpuDemandCores)}核→${sizing.cpuServers} 台；内存需求 ${round(sizing.memoryDemandGb)}GB→${sizing.memoryServers} 台`],
     ["副本落盘容量", `${round(sizing.storedDataTb)}TB，DN 容量口径需 ${sizing.dnServersByCapacity} 台`]
   ];
 
@@ -1312,15 +1555,127 @@ function round(value) {
 }
 
 function renderTopology(data) {
+  $("topology").classList.toggle("business-topology", !data.reverse);
+  $("topology").classList.toggle("reverse-topology", data.reverse);
   if (data.reverse) {
     $("topology").innerHTML = renderReverseTopology(data);
     return;
   }
-  const layout = getLayout(data.mode);
+  $("topology").innerHTML = renderBusinessTopology(data);
+}
+
+function renderBusinessTopology(data) {
+  const layout = getBusinessLayout(data.mode);
   const svg = renderLinks(layout.links);
   const overview = renderTopologyOverview(data);
-  const sites = layout.sites.map((site) => renderSite(site, data)).join("");
-  $("topology").innerHTML = `${svg}${overview}${sites}`;
+  const sites = layout.sites.map((site) => renderBusinessSite(site, data)).join("");
+  const haMatrix = renderBusinessHaMatrix(data);
+
+  return `${svg}${overview}${sites}${haMatrix}`;
+}
+
+function getBusinessLayout(mode) {
+  if (mode === "local1az") {
+    return {
+      sites: [
+        { id: "local", name: "本地机房", role: "POC/验证中心", x: 18, y: 12, w: 64, h: 38 }
+      ],
+      links: []
+    };
+  }
+  if (mode === "local2az") {
+    return {
+      sites: [
+        { id: "a", name: "AZ-A", role: "生产机房", x: 5, y: 12, w: 42, h: 42 },
+        { id: "b", name: "AZ-B", role: "同城机房", x: 53, y: 12, w: 42, h: 42 }
+      ],
+      links: [["a", "b", "sync"]]
+    };
+  }
+  if (mode === "twoSiteThreeDc") {
+    return {
+      sites: [
+        { id: "a", name: "中心 A", role: "生产中心", x: 4, y: 10, w: 29, h: 43 },
+        { id: "b", name: "中心 B", role: "同城中心", x: 36, y: 10, w: 29, h: 43 },
+        { id: "c", name: "中心 C", role: "异地灾备", x: 69, y: 16, w: 27, h: 37, disaster: true }
+      ],
+      links: [
+        ["a", "b", "sync"],
+        ["b", "c", "async"],
+        ["a", "c", "async"]
+      ]
+    };
+  }
+  return {
+    sites: [
+      { id: "a1", name: "A1", role: "生产中心", x: 3, y: 9, w: 27, h: 25 },
+      { id: "a2", name: "A2", role: "同城中心", x: 3, y: 39, w: 27, h: 23 },
+      { id: "b1", name: "B1", role: "异地热备", x: 37, y: 9, w: 27, h: 25 },
+      { id: "b2", name: "B2", role: "异地同城备", x: 37, y: 39, w: 27, h: 23 },
+      { id: "c1", name: "C1", role: "远程兜底", x: 71, y: 24, w: 26, h: 28, disaster: true }
+    ],
+    links: [
+      ["a1", "a2", "sync"],
+      ["b1", "b2", "sync"],
+      ["a1", "b1", "async"],
+      ["a2", "b2", "async"],
+      ["b1", "c1", "async"]
+    ]
+  };
+}
+
+function renderBusinessSite(site, data) {
+  const cnText = `${data.cnPerAz} CN/AZ`;
+  const dnText = site.disaster && data.mode !== "threeSiteFiveDc"
+    ? "灾备副本"
+    : `${data.shardCount} Group`;
+  const gtmText = data.shape === "distributed"
+    ? `${site.disaster ? "备" : data.gtmPerPrimaryAz} GTM`
+    : "GTM 可选";
+  const mgrText = site.disaster ? "管理备" : "管理节点";
+  const tenantBrief = data.tenantPlans
+    .slice(0, 3)
+    .map((tenant) => `<span>${tenant.name}: CN ${tenant.cnPerAz}/AZ · DN ${tenant.shardCount}G×${tenant.replicasPerShard}</span>`)
+    .join("");
+
+  return `
+    <section class="site business-site ${site.disaster ? "disaster-site" : ""}" style="left:${site.x}%;top:${site.y}%;width:${site.w}%;height:${site.h}%">
+      <div class="site-title"><span>${site.name}</span><small>${site.role}</small></div>
+      <div class="node-grid">
+        <div class="node cn"><strong>${cnText}</strong><small>租户计算入口，多 CN 负载均衡</small></div>
+        <div class="node dn"><strong>${dnText}</strong><small>${getDnRoleText(site, data)}</small></div>
+        <div class="node gtm"><strong>${gtmText}</strong><small>${data.gtmBinding.kind === "shared" ? "共享事务域" : "租户事务域"}</small></div>
+        <div class="node mgr"><strong>${mgrText}</strong><small>OMM/Insight 管理面 HA</small></div>
+      </div>
+      <div class="site-tenant-strip">${tenantBrief}</div>
+    </section>
+  `;
+}
+
+function renderBusinessHaMatrix(data) {
+  const tenantCards = data.tenantPlans
+    .slice(0, 4)
+    .map((tenant) => `
+      <article class="business-ha-tenant">
+        <div>
+          <strong>${tenant.name}</strong>
+          <span>${tenant.type}</span>
+        </div>
+        <p>CN：${tenant.cnPerAz}/AZ，单 CN 推荐 ${tenant.cnSpecLabel || `${tenant.cnCores}C/${tenant.cnMemoryGb}GB`}；DN：${tenant.shardCount} Group，单 DN 推荐 ${tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`}。</p>
+        <small>GTM：${tenant.gtmGroupText}；管理节点：${data.managementNodes} 套/副本管控租户拓扑、监控、切换。</small>
+      </article>
+    `)
+    .join("");
+
+  return `
+    <section class="business-ha-matrix">
+      <div class="business-ha-head">
+        <strong>地域 / 租户 / 组件高可用架构</strong>
+        <span>${modeLabels[data.mode]} · ${data.serverSizing.recommendedServers} 台服务器建议 · ${data.serverSizing.componentLayoutLabel}</span>
+      </div>
+      <div class="business-ha-grid">${tenantCards}</div>
+    </section>
+  `;
 }
 
 function renderReverseTopology(data) {
@@ -1337,20 +1692,11 @@ function renderReverseTopology(data) {
       </article>
     `)
     .join("");
-  const serverTiles = servers.map((server) => {
-    const roleGroups = summarizeServerRoles(server.roles);
-    return `
-      <article class="reverse-server-node ${server.roles.length ? "" : "reserve"}">
-        <div>
-          <strong>${server.id}</strong>
-          <span>${server.az}</span>
-        </div>
-        <p>${roleGroups}</p>
-        <small class="reverse-server-detail">${renderServerRoleDetail(server.roles)}</small>
-        <small>CPU ${server.cpuLoad}% · 磁盘 ${server.diskLoad}% · ${server.roles.length ? `${server.roles.length} 组件实例` : "预留节点"}</small>
-      </article>
-    `;
-  }).join("");
+  const tenantRelationChains = data.tenantPlans
+    .slice(0, 6)
+    .map((tenant) => renderTenantComponentChain(tenant, data.serverPlan))
+    .join("");
+  const serverTiles = renderTopologyServerTiles(servers);
 
   return `
     ${renderTopologyOverview(data)}
@@ -1404,17 +1750,142 @@ function renderReverseTopology(data) {
         </div>
         <div class="reverse-tenant-map-grid">${tenantMap}</div>
       </section>
+
+      <section class="reverse-tenant-chain-section">
+        <div class="reverse-section-title">
+          <strong>租户 / CN / DN / GTM 关系链</strong>
+          <span>按租户命名组件，明确租户资源归属与访问路径</span>
+        </div>
+        <div class="tenant-chain-list">${tenantRelationChains}</div>
+      </section>
     </div>
   `;
 }
 
+function renderTopologyServerTiles(servers) {
+  return servers.map((server) => {
+    const roleGroups = summarizeServerRoles(server.roles);
+    return `
+      <article class="reverse-server-node ${server.roles.length ? "" : "reserve"}">
+        <div>
+          <strong>${server.id}</strong>
+          <span>${server.az}</span>
+        </div>
+        <p>${roleGroups}</p>
+        <small class="reverse-server-detail">${renderServerRoleDetail(server.roles)}</small>
+        <small>CPU ${server.cpuLoad}% · 磁盘 ${server.diskLoad}% · ${server.roles.length ? `${server.roles.length} 组件实例` : "预留节点"}</small>
+      </article>
+    `;
+  }).join("");
+}
+
+function renderTenantComponentChain(tenant, serverPlan) {
+  const tenantCnRoles = getTenantRolesFromServers(tenant.name, serverPlan, isCnRole);
+  const cnNodes = (tenantCnRoles.length
+    ? tenantCnRoles
+    : Array.from({ length: tenant.cnPerAz }, (_, index) => `${tenant.name}-CN${index + 1}`))
+    .slice(0, 8);
+  const dnNodes = [];
+  for (let group = 1; group <= Math.min(tenant.shardCount, 4); group += 1) {
+    dnNodes.push(`${tenant.name}-DN-G${group}-Master`);
+    const slaveCount = Math.min(Math.max(0, tenant.replicasPerShard - 1), 2);
+    for (let slave = 1; slave <= slaveCount; slave += 1) {
+      dnNodes.push(`${tenant.name}-DN-G${group}-Slave${slave}`);
+    }
+  }
+  const hiddenDn = tenant.shardCount > 4 || tenant.replicasPerShard > 3
+    ? `<span class="tenant-chain-more">其余 DN：${tenant.shardCount} Group × ${tenant.replicasPerShard} 副本继续展开</span>`
+    : "";
+  const tenantGtmRoles = getTenantGtmRolesFromServers(tenant, serverPlan);
+  const gtmNodes = tenantGtmRoles.length ? tenantGtmRoles : tenant.isDistributed
+    ? [tenant.gtmLabel.includes("共享") ? "GTM-SYS" : `${tenant.name}-GTM1`]
+    : ["GTM 可选"];
+  const cnServerText = renderComponentServerMap(cnNodes, serverPlan, "cn");
+  const dnServerText = renderComponentServerMap(dnNodes, serverPlan, "dn");
+  const gtmServerText = renderComponentServerMap(gtmNodes, serverPlan, "gtm");
+
+  return `
+    <article class="tenant-chain-card">
+      <div class="tenant-chain-root">
+        <strong>${tenant.name}</strong>
+        <small>${tenant.type}</small>
+      </div>
+      <div class="tenant-chain-arrow">应用连接</div>
+      <div class="tenant-chain-group cn">
+        <b>CN 计算入口</b>
+        <div>${cnNodes.map((node) => `<span>${node}</span>`).join("")}</div>
+        <small class="tenant-chain-server-map">${cnServerText}</small>
+      </div>
+      <div class="tenant-chain-arrow">路由访问</div>
+      <div class="tenant-chain-group dn">
+        <b>DN 分片与副本</b>
+        <div>${dnNodes.map((node) => `<span>${node}</span>`).join("")}${hiddenDn}</div>
+        <small class="tenant-chain-server-map">${dnServerText}</small>
+      </div>
+      <div class="tenant-chain-arrow">全局事务</div>
+      <div class="tenant-chain-group gtm">
+        <b>GTM 绑定</b>
+        <div>${gtmNodes.map((node) => `<span>${node}</span>`).join("")}<small>${tenant.gtmGroupText}</small></div>
+        <small class="tenant-chain-server-map">${gtmServerText}</small>
+      </div>
+    </article>
+  `;
+}
+
+function getTenantRolesFromServers(tenantName, serverPlan, predicate) {
+  const roles = [];
+  serverPlan.forEach((server) => {
+    server.roles.forEach((role) => {
+      if (role.startsWith(`${tenantName}-`) && predicate(role) && !roles.includes(role)) {
+        roles.push(role);
+      }
+    });
+  });
+  return roles;
+}
+
+function getTenantGtmRolesFromServers(tenant, serverPlan) {
+  const roles = [];
+  serverPlan.forEach((server) => {
+    server.roles.forEach((role) => {
+      const matchesDedicated = role.startsWith(`${tenant.name}-GTM`);
+      const matchesShared = tenant.gtmLabel.includes("共享") && role.startsWith("GTM-SYS");
+      if ((matchesDedicated || matchesShared) && !roles.includes(role)) {
+        roles.push(role);
+      }
+    });
+  });
+  return roles.slice(0, 4);
+}
+
+function renderComponentServerMap(nodes, serverPlan, type) {
+  const pairs = nodes
+    .map((node) => {
+      const server = findServerForComponent(node, serverPlan, type);
+      return server ? `${node}@${server.id}` : `${node}@待分配`;
+    })
+    .slice(0, 5);
+  const more = nodes.length > 5 ? ` / +${nodes.length - 5} 项` : "";
+  return `服务器关联：${pairs.join(" / ")}${more}`;
+}
+
+function findServerForComponent(node, serverPlan, type) {
+  if (type === "gtm" && node === "GTM-SYS") {
+    return serverPlan.find((server) => server.roles.some((role) => role.startsWith("GTM-SYS") || role === "GTM"));
+  }
+  return serverPlan.find((server) => server.roles.some((role) => {
+    if (type === "dn") return role === `DN ${node}` || role.includes(node);
+    return role === node || role.includes(node);
+  }));
+}
+
 function summarizeServerRoles(roles) {
   if (!roles.length) return "预留资源";
-  const cn = roles.filter((role) => role === "CN").length;
-  const gtm = roles.filter((role) => role === "GTM").length;
+  const cn = roles.filter(isCnRole).length;
+  const gtm = roles.filter(isGtmRole).length;
   const mgr = roles.filter((role) => role === "管理节点").length;
-  const dnMaster = roles.filter((role) => role.startsWith("DN") && role.includes("Master")).length;
-  const dnSlave = roles.filter((role) => role.startsWith("DN") && role.includes("Slave")).length;
+  const dnMaster = roles.filter((role) => isDnRole(role) && role.includes("Master")).length;
+  const dnSlave = roles.filter((role) => isDnRole(role) && role.includes("Slave")).length;
   const parts = [];
   if (cn) parts.push(`CN×${cn}`);
   if (dnMaster) parts.push(`DN-M×${dnMaster}`);
@@ -1550,6 +2021,11 @@ function renderTenantCard(tenant) {
         <div class="tenant-resource cn"><b>CN</b><span>${tenant.cnPerAz}/AZ · 租户入口</span></div>
         <div class="tenant-resource dn"><b>DN</b><span>${tenant.shardCount} Group · ${tenant.dnInstances} 实例</span></div>
         <div class="tenant-resource gtm"><b>GTM</b><span>${tenant.gtmLabel}</span></div>
+      </div>
+      <div class="replica-strip spec-strip">
+        <b>节点规格</b>
+        <span>CN ${tenant.cnSpecLabel || `${tenant.cnCores}C/${tenant.cnMemoryGb}GB`}</span>
+        <span>DN ${tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`}</span>
       </div>
       <div class="replica-strip">
         <b>DN副本</b>
@@ -1788,7 +2264,7 @@ function updateTenantSpec(input) {
   const target = list[Number(input.dataset.index)];
   if (!target) return;
   const key = input.dataset.key;
-  const numericKeys = new Set(["qps", "dataTb", "minShards", "cnPerAz", "shardCount", "replicaCount"]);
+  const numericKeys = new Set(["qps", "dataTb", "minShards", "cnPerAz", "shardCount", "replicaCount", "cnCores", "cnMemoryGb", "dnCores", "dnMemoryGb"]);
   target[key] = numericKeys.has(key) ? Number(input.value) : input.value;
 }
 
@@ -1808,7 +2284,11 @@ function createReverseTenantSpec(index) {
     type: "distributed",
     cnPerAz: $("environmentType").value === "poc" ? 1 : 2,
     shardCount: 2,
-    replicaCount: getMinimumReplicaCount($("environmentType").value, $("reverseDeploymentMode").value)
+    replicaCount: getMinimumReplicaCount($("environmentType").value, $("reverseDeploymentMode").value),
+    cnCores: 8,
+    cnMemoryGb: 16,
+    dnCores: 16,
+    dnMemoryGb: 64
   };
 }
 
