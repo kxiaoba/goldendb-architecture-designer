@@ -28,10 +28,8 @@ body {
   background:
     linear-gradient(90deg, rgba(215, 255, 98, 0.04) 1px, transparent 1px),
     linear-gradient(0deg, rgba(215, 255, 98, 0.035) 1px, transparent 1px),
-    radial-gradient(circle at 20% 0%, rgba(66, 232, 196, 0.12), transparent 34rem),
-    radial-gradient(circle at 95% 12%, rgba(110, 183, 255, 0.12), transparent 30rem),
     var(--bg);
-  background-size: 36px 36px, 36px 36px, auto, auto, auto;
+  background-size: 36px 36px, 36px 36px, auto;
   font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
@@ -234,6 +232,93 @@ select:focus {
   line-height: 1.45;
 }
 
+.parameter-headline {
+  margin-bottom: 10px;
+}
+
+.customer-server-config {
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.component-config-intro {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.component-config-intro strong {
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.component-config-intro span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.component-machine-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.component-config-card {
+  border: 1px solid #34584c;
+  background: rgba(13, 24, 21, 0.76);
+  padding: 11px;
+}
+
+.component-config-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.component-config-toggle input {
+  flex: 0 0 auto;
+  width: 18px;
+  min-height: 18px;
+  margin-top: 1px;
+}
+
+.component-config-toggle span {
+  display: grid;
+  gap: 3px;
+}
+
+.component-config-toggle strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.component-config-toggle small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.component-config-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 11px;
+}
+
+.component-config-fields .field {
+  margin-bottom: 0;
+}
+
+.component-model-field {
+  grid-column: 1 / -1;
+}
+
+.component-config-inactive .component-config-fields {
+  opacity: 0.38;
+}
+
 .compact-btn {
   flex: 0 0 auto;
   min-height: 30px;
@@ -311,7 +396,9 @@ select:focus {
 
 .canvas-panel {
   display: grid;
-  grid-template-rows: auto minmax(440px, 1fr) auto auto;
+  grid-template-rows: repeat(5, auto);
+  align-content: start;
+  min-width: 0;
   padding: 18px;
 }
 
@@ -1249,6 +1336,57 @@ td:first-child {
   overflow-wrap: anywhere;
 }
 
+.component-spec-output {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.component-spec-row {
+  display: grid;
+  grid-template-columns: minmax(118px, 0.8fr) 48px minmax(0, 1.4fr);
+  gap: 6px 9px;
+  align-items: start;
+  border: 1px solid #34584c;
+  background: rgba(13, 24, 21, 0.82);
+  padding: 9px;
+}
+
+.component-spec-row div {
+  display: grid;
+  gap: 3px;
+}
+
+.component-spec-row strong,
+.component-spec-row b {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.component-spec-row span,
+.component-spec-row small,
+.component-spec-row i,
+.component-spec-row em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.component-spec-row b {
+  text-align: right;
+}
+
+.component-spec-row i,
+.component-spec-row em {
+  grid-column: 3;
+}
+
+.component-spec-row em {
+  color: #dceee5;
+}
+
 .server-plan-list {
   display: grid;
   gap: 7px;
@@ -1287,8 +1425,353 @@ td:first-child {
   color: #dceee5;
 }
 
+.physical-server-output {
+  margin-top: 12px;
+  border-top: 1px solid #315a4f;
+  padding-top: 10px;
+}
+
+.physical-output-row {
+  grid-template-columns: 78px 120px minmax(0, 1fr);
+}
+
 a {
   color: var(--teal);
+}
+
+.server-topology-card {
+  margin-top: 14px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: #0b1512;
+  padding: 14px;
+}
+
+.server-topology {
+  overflow: auto;
+  border: 1px solid #22392f;
+  background: #08120f;
+}
+
+.ppt-network-board,
+.physical-topology-board {
+  position: relative;
+  min-width: max(920px, calc(var(--site-count) * 300px));
+  padding: 58px 14px 14px;
+}
+
+.physical-topology-board {
+  padding-top: 14px;
+}
+
+.ppt-workload-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  border: 1px solid #315a4f;
+  background: #0d1c18;
+  padding: 9px;
+}
+
+.ppt-workload-row strong {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.ppt-workload-row span,
+.ppt-site-apps span {
+  border: 1px solid var(--blue);
+  background: rgba(83, 176, 255, 0.08);
+  color: #e8f5ff;
+  padding: 5px 8px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.ppt-site-grid,
+.physical-site-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--site-count), minmax(280px, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+
+.ppt-site-column,
+.physical-site {
+  border: 1px solid #346455;
+  background: rgba(13, 29, 24, 0.9);
+  min-width: 0;
+}
+
+.ppt-site-column.disaster,
+.physical-site.disaster {
+  border-color: #8d7433;
+  background: rgba(30, 26, 15, 0.68);
+}
+
+.ppt-site-column > header,
+.physical-site > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid #315a4f;
+  padding: 9px 10px;
+}
+
+.ppt-site-column > header strong,
+.physical-site > header strong {
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.ppt-site-column > header span,
+.physical-site > header span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.ppt-site-apps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 9px 9px 0;
+}
+
+.ppt-host-groups,
+.rack-grid {
+  display: grid;
+  gap: 9px;
+  padding: 9px;
+}
+
+.ppt-host-group,
+.rack-group {
+  border: 1px dashed #51766a;
+  background: rgba(6, 15, 12, 0.66);
+  padding: 7px;
+}
+
+.ppt-host-group-title,
+.rack-title,
+.ppt-server-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ppt-host-group-title,
+.rack-title {
+  margin-bottom: 7px;
+}
+
+.ppt-host-group-title strong,
+.rack-title strong,
+.ppt-server-head strong {
+  color: #edf8f3;
+  font-size: 10px;
+}
+
+.ppt-host-group-title span,
+.rack-title span,
+.ppt-server-head span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.ppt-logical-server-grid,
+.physical-server-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.ppt-logical-server {
+  border: 1px solid #3d8b79;
+  background: #0c1915;
+  padding: 7px;
+  min-width: 0;
+}
+
+.ppt-logical-server.reserve,
+.physical-server.reserve {
+  opacity: 0.64;
+}
+
+.ppt-logical-server p,
+.ppt-empty-site {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.ppt-tenant-boundary,
+.ppt-system-boundary {
+  margin-top: 6px;
+  border: 1px dashed var(--teal);
+  padding: 5px;
+}
+
+.ppt-tenant-boundary.tenant-1 { border-color: var(--accent); }
+.ppt-tenant-boundary.tenant-2 { border-color: var(--warn); }
+.ppt-tenant-boundary.tenant-3 { border-color: var(--blue); }
+.ppt-system-boundary { border-color: #839b93; }
+
+.ppt-tenant-boundary b,
+.ppt-system-boundary b {
+  display: block;
+  margin-bottom: 4px;
+  color: #dceee5;
+  font-size: 8px;
+}
+
+.ppt-tenant-boundary > div,
+.ppt-system-boundary > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.ppt-role-pill,
+.role-more {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  border: 1px solid #315a4f;
+  background: #08120f;
+  color: #e7f4ee;
+  padding: 3px 4px;
+  font-size: 8px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.ppt-role-pill.cn { border-color: var(--teal); }
+.ppt-role-pill.dn { border-color: var(--accent); }
+.ppt-role-pill.gtm { border-color: var(--warn); }
+.ppt-role-pill.management { border-color: var(--blue); }
+
+.ppt-link-band {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 10px;
+  align-items: center;
+  margin-top: 11px;
+  color: #dceee5;
+  font-size: 10px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.ppt-link-band i {
+  height: 3px;
+  background: var(--teal);
+}
+
+.ppt-link-band:not(.single) i:last-child {
+  background: repeating-linear-gradient(90deg, var(--warn) 0 7px, transparent 7px 12px);
+}
+
+.ppt-plan-note {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  border-top: 1px solid #27463d;
+  padding-top: 9px;
+}
+
+.ppt-plan-note strong {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.ppt-plan-note span {
+  color: var(--muted);
+  font-size: 10px;
+  text-align: right;
+}
+
+.physical-server {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 7px;
+  border: 1px solid #3d8b79;
+  background: #0c1915;
+  padding: 7px;
+  min-width: 0;
+}
+
+.server-chassis {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  height: 48px;
+  border: 1px solid #89a69c;
+  background: #dce7e2;
+  padding: 5px 4px;
+}
+
+.server-chassis i {
+  height: 6px;
+  border: 1px solid #718a81;
+  background: #9fb4ac;
+}
+
+.physical-server-info {
+  min-width: 0;
+}
+
+.physical-server-info > div {
+  display: grid;
+  gap: 2px;
+}
+
+.physical-server-info strong {
+  color: var(--accent);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.physical-server-info span,
+.physical-server-info small,
+.physical-server-info em {
+  display: block;
+  color: var(--muted);
+  font-size: 8px;
+  font-style: normal;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.physical-server-info span {
+  text-align: left;
+}
+
+.physical-server-info p {
+  margin: 4px 0;
+  color: #eef7f3;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.physical-server-info em {
+  margin-top: 4px;
+  color: #bfd5cb;
+}
+
+.physical-link-row {
+  margin-top: 10px;
+  border-top: 3px solid var(--teal);
+  padding-top: 7px;
+  color: var(--muted);
+  font-size: 9px;
+  text-align: center;
 }
 
 @media (max-width: 1100px) {
