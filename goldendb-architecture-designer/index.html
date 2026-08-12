@@ -286,10 +286,13 @@
               <h2>组网规划</h2>
               <p id="topologySubtitle">同城双中心强一致，异地中心用于灾备接管。</p>
             </div>
-            <div class="legend">
-              <span><i class="sync"></i>同步/快同步</span>
-              <span><i class="async"></i>异步灾备</span>
-              <span><i class="mgmt"></i>管理链路</span>
+            <div class="canvas-actions">
+              <div class="legend">
+                <span><i class="sync"></i>同步/快同步</span>
+                <span><i class="async"></i>异步灾备</span>
+                <span><i class="mgmt"></i>管理链路</span>
+              </div>
+              <button id="downloadTopologyBtn" class="ghost-btn export-btn" type="button">下载组网规划 PNG</button>
             </div>
           </div>
 
@@ -297,8 +300,11 @@
 
           <div class="server-topology-card">
             <div class="relation-head">
-              <h3>组网规划-服务器</h3>
-              <span>机房 / 机柜 / Server / 组件物理落位</span>
+              <div>
+                <h3>组网规划-服务器</h3>
+                <span>机房 / 机柜 / Server / 组件物理落位</span>
+              </div>
+              <button id="downloadServerTopologyBtn" class="ghost-btn export-btn" type="button">下载服务器规划 PNG</button>
             </div>
             <div id="serverTopology" class="server-topology" role="img" aria-label="GoldenDB 服务器物理组网拓扑"></div>
           </div>

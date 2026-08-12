@@ -2938,6 +2938,122 @@ function copySummary() {
   });
 }
 
+async function downloadTopologyImage(targetId, buttonId, filePrefix) {
+  const target = $(targetId);
+  const button = $(buttonId);
+  if (!target || !button) return;
+
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "正在生成 PNG...";
+
+  try {
+    const blob = await renderElementToPng(target);
+    const link = document.createElement("a");
+    const date = new Date();
+    const dateText = [date.getFullYear(), date.getMonth() + 1, date.getDate()]
+      .map((value, index) => index === 0 ? String(value) : String(value).padStart(2, "0"))
+      .join("");
+    const mode = $("designModule").value === "reverse"
+      ? $("reverseDeploymentMode").value
+      : $("deploymentMode").value;
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = `${filePrefix}-${mode}-${dateText}.png`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    button.textContent = "下载完成";
+  } catch (error) {
+    console.error("拓扑图片生成失败", error);
+    button.textContent = "生成失败，请重试";
+  } finally {
+    setTimeout(() => {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }, 1400);
+  }
+}
+
+async function renderElementToPng(target) {
+  await document.fonts?.ready;
+  const width = Math.ceil(Math.max(target.scrollWidth, target.getBoundingClientRect().width));
+  const height = Math.ceil(Math.max(target.scrollHeight, target.getBoundingClientRect().height));
+  const maxDimension = 12000;
+  const maxPixels = 60000000;
+  const scale = Math.max(1, Math.min(
+    2,
+    maxDimension / width,
+    maxDimension / height,
+    Math.sqrt(maxPixels / Math.max(1, width * height))
+  ));
+  const clone = target.cloneNode(true);
+  inlineExportStyles(target, clone);
+  clone.style.width = `${width}px`;
+  clone.style.height = `${height}px`;
+  clone.style.maxWidth = "none";
+  clone.style.overflow = "visible";
+  clone.scrollLeft = 0;
+  clone.scrollTop = 0;
+
+  const serialized = new XMLSerializer().serializeToString(clone);
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+      <foreignObject width="100%" height="100%">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="width:${width}px;height:${height}px;background:#08110f;color:#eef6ea;">
+          ${serialized}
+        </div>
+      </foreignObject>
+    </svg>`;
+  const source = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  const image = await loadExportImage(source);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#08110f";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("浏览器未生成 PNG 数据")), "image/png", 1);
+  });
+}
+
+function inlineExportStyles(source, clone) {
+  const properties = [
+    "align-content", "align-items", "align-self", "background", "background-color", "background-image",
+    "background-position", "background-repeat", "background-size", "border", "border-color", "border-radius",
+    "border-style", "border-width", "bottom", "box-shadow", "box-sizing", "color", "column-gap", "display",
+    "flex", "flex-basis", "flex-direction", "flex-grow", "flex-shrink", "flex-wrap", "font-family", "font-size",
+    "font-style", "font-weight", "gap", "grid-auto-columns", "grid-auto-flow", "grid-auto-rows",
+    "grid-column", "grid-row", "grid-template-columns", "grid-template-rows", "height", "inset", "justify-content",
+    "justify-items", "justify-self", "left", "letter-spacing", "line-height", "margin", "max-height", "max-width",
+    "min-height", "min-width", "object-fit", "opacity", "overflow", "overflow-wrap", "padding", "position", "right",
+    "row-gap", "text-align", "text-decoration", "text-overflow", "text-transform", "top", "transform",
+    "transform-origin", "vertical-align", "visibility", "white-space", "width", "word-break", "z-index"
+  ];
+  const sourceNodes = [source, ...source.querySelectorAll("*")];
+  const cloneNodes = [clone, ...clone.querySelectorAll("*")];
+  sourceNodes.forEach((node, index) => {
+    const computed = getComputedStyle(node);
+    const targetNode = cloneNodes[index];
+    properties.forEach((property) => {
+      const value = computed.getPropertyValue(property);
+      if (value) targetNode.style.setProperty(property, value);
+    });
+  });
+}
+
+function loadExportImage(source) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("浏览器无法渲染拓扑快照"));
+    image.src = source;
+  });
+}
+
 function resetForm() {
   Object.entries(defaults).forEach(([key, value]) => {
     const el = $(key);
@@ -3097,6 +3213,16 @@ function normalizeTenantOrder(specs) {
 
 $("copyBtn").addEventListener("click", copySummary);
 $("resetBtn").addEventListener("click", resetForm);
+$("downloadTopologyBtn").addEventListener("click", () => downloadTopologyImage(
+  "topology",
+  "downloadTopologyBtn",
+  "goldendb-network-plan"
+));
+$("downloadServerTopologyBtn").addEventListener("click", () => downloadTopologyImage(
+  "serverTopology",
+  "downloadServerTopologyBtn",
+  "goldendb-server-plan"
+));
 
 renderComponentMachineEditor();
 bindParameterEvents();
