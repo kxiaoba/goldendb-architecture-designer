@@ -97,7 +97,7 @@
                 <input id="singleCoreTps" type="number" min="1" value="50">
               </label>
               <label class="field">
-                <span>机器核数</span>
+                <span>单台 CN 物理核数</span>
                 <input id="cpuCores" type="number" min="1" value="64">
               </label>
               <label class="field">
@@ -117,19 +117,20 @@
 
             <div class="divider"></div>
 
-            <div class="section-label">DN 分片与副本公式</div>
+            <div class="section-headline parameter-headline">
+              <div>
+                <span class="section-label">DN 分片规划水位</span>
+                <small>容量和 TPS 均指单个主 DN（单分片）的规划水位；2TB、4000TPS 是公开指南基准，并非产品硬上限，生产应以同规格 POC 压测校准。副本数在各租户中手动设置。</small>
+              </div>
+            </div>
             <div class="grid-two">
               <label class="field">
-                <span>单分片最大 TB</span>
+                <span>单主 DN（单分片）容量水位 TB</span>
                 <input id="maxShardTb" type="number" min="0.1" step="0.1" value="2">
               </label>
               <label class="field">
-                <span>最低分片数</span>
-                <input id="minShards" type="number" min="1" value="2">
-              </label>
-              <label class="field">
-                <span>单分片安全 TPS</span>
-                <input id="safeShardTps" type="number" min="1" value="2500">
+                <span>单主 DN（单分片）TPS 水位</span>
+                <input id="safeShardTps" type="number" min="1" value="4000">
               </label>
             </div>
 
@@ -161,25 +162,24 @@
                 </select>
               </label>
               <label class="field">
-                <span>每台内存 GB</span>
-                <input id="businessMemoryGb" type="number" min="1" value="256">
-              </label>
-              <label class="field">
-                <span>每台磁盘 TB</span>
-                <input id="businessDiskTb" type="number" min="0.1" step="0.1" value="8">
+                <span>服务器规格来源</span>
+                <select id="businessServerConfigMode">
+                  <option value="recommended" selected>跳过录入，使用组件推荐规格</option>
+                  <option value="customer">录入客户国产服务器机型</option>
+                </select>
               </label>
               <label class="field">
                 <span>资源预留比例</span>
                 <input id="businessReserveRatio" type="number" min="0" max="0.8" step="0.05" value="0.35">
               </label>
-              <label class="field">
-                <span>最大单机 CN</span>
-                <input id="businessMaxCnPerServer" type="number" min="1" value="2">
-              </label>
-              <label class="field">
-                <span>最大单机 DN</span>
-                <input id="businessMaxDnPerServer" type="number" min="1" value="2">
-              </label>
+            </div>
+
+            <div id="customerServerConfig" class="customer-server-config hidden">
+              <div class="component-config-intro">
+                <strong>客户机型按组件录入</strong>
+                <span>勾选后使用客户提供的机型计算；未勾选的组件继续采用推荐规格。CPU 必须填写物理核，操作系统及 CPU 架构需按 GoldenDB 当前版本认证清单复核。</span>
+              </div>
+              <div id="componentMachineGrid" class="component-machine-grid"></div>
             </div>
           </section>
 
@@ -283,17 +283,31 @@
         <section class="canvas-panel" aria-label="架构拓扑">
           <div class="canvas-head">
             <div>
-              <h2>拓扑视图</h2>
+              <h2>组网规划</h2>
               <p id="topologySubtitle">同城双中心强一致，异地中心用于灾备接管。</p>
             </div>
-            <div class="legend">
-              <span><i class="sync"></i>同步/快同步</span>
-              <span><i class="async"></i>异步灾备</span>
-              <span><i class="mgmt"></i>管理链路</span>
+            <div class="canvas-actions">
+              <div class="legend">
+                <span><i class="sync"></i>同步/快同步</span>
+                <span><i class="async"></i>异步灾备</span>
+                <span><i class="mgmt"></i>管理链路</span>
+              </div>
+              <button id="downloadTopologyBtn" class="ghost-btn export-btn" type="button">下载组网规划 PNG</button>
             </div>
           </div>
 
           <div id="topology" class="topology" role="img" aria-label="GoldenDB 部署拓扑"></div>
+
+          <div class="server-topology-card">
+            <div class="relation-head">
+              <div>
+                <h3>组网规划-服务器</h3>
+                <span>机房 / 机柜 / Server / 组件物理落位</span>
+              </div>
+              <button id="downloadServerTopologyBtn" class="ghost-btn export-btn" type="button">下载服务器规划 PNG</button>
+            </div>
+            <div id="serverTopology" class="server-topology" role="img" aria-label="GoldenDB 服务器物理组网拓扑"></div>
+          </div>
 
           <div class="relation-card">
             <div class="relation-head">
@@ -326,7 +340,7 @@
             </div>
             <div class="metric-card">
               <span id="replicasPerShard">4</span>
-              <small>每分片副本</small>
+              <small>最大每分片副本</small>
             </div>
             <div class="metric-card">
               <span id="dnInstances">8</span>
@@ -365,6 +379,10 @@
             <h3>依据标注</h3>
             <ul class="source-list">
               <li><strong>官方入口</strong>：<a href="https://www.goldendb.com/" target="_blank" rel="noreferrer">GoldenDB 官网</a>。</li>
+              <li><strong>架构与部署形态</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/goldendb/%E9%87%91%E7%AF%86%E4%BF%A1%E7%A7%91GoldenDB%E6%95%B0%E6%8D%AE%E5%BA%93V6%E6%8A%80%E6%9C%AF%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf" target="_blank" rel="noreferrer">《GoldenDB 数据库 V6 技术白皮书》</a>，用于核对集中式/分布式组件关系、物理机/容器部署与资源弹性。</li>
+              <li><strong>容量/性能规划</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/mediares/golden_db/pdf/report2024010303.pdf" target="_blank" rel="noreferrer">《GoldenDB 分布式事务型数据库金融应用指南》</a>，分片数按容量与单分片 TPS 预估共同确定。</li>
+              <li><strong>参考图参数口径</strong>：海光双路 64 物理核、1024GB、双万兆、系统盘 RAID1、NVMe 数据盘属于具体项目服务器基线，页面支持按组件录入，但不将其视为 GoldenDB 产品硬上限或所有项目的统一推荐。</li>
+              <li><strong>副本高可用</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/mediares/zte/zhengqi/finance/hangyedongcha/GoldenDB.pdf" target="_blank" rel="noreferrer">《GoldenDB 分布式数据库技术白皮书》</a>，Group 由多个 DN 构成，采用一主多备。</li>
               <li><strong>架构核对</strong>：<a href="https://www.modb.pro/db/1861230042106310656" target="_blank" rel="noreferrer">GoldenDB 架构概述</a>、<a href="https://www.cnblogs.com/smart-cloud/articles/19176195" target="_blank" rel="noreferrer">GoldenDB 数据库架构与部署</a>。</li>
               <li><strong>租户/水位核对</strong>：<a href="https://www.modb.pro/db/1772275217795223552" target="_blank" rel="noreferrer">GoldenDB 租户管理</a>、<a href="https://www.cnblogs.com/xinxin1222/p/18021912" target="_blank" rel="noreferrer">GoldenDB 安装部署参数</a>。</li>
               <li><strong>案例核对</strong>：<a href="https://www.bankalliance.com.cn/sccba/service/paas/database02/goldend6.1.3/index.html" target="_blank" rel="noreferrer">GoldenDB 6.1.3 金融云服务介绍</a>。</li>
