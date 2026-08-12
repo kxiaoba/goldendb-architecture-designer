@@ -1111,9 +1111,12 @@ function getReplicaCount(mode, shape, environment = "production") {
   return 5;
 }
 
-function render() {
+function render(options = {}) {
+  const shouldRenderTenantEditors = options.tenantEditors !== false;
   syncParameterPanels();
-  renderTenantEditors();
+  if (shouldRenderTenantEditors) {
+    renderTenantEditors();
+  }
   const isReverse = $("designModule").value === "reverse";
   const data = isReverse ? calculateReverse() : calculate();
   renderSummary(data);
@@ -1164,11 +1167,11 @@ function renderBusinessTenantEditor() {
           <input class="tenant-input" data-mode="business" data-index="${index}" data-key="qps" type="number" min="1" value="${tenant.qps}">
         </label>
         <label class="field compact-field">
-          <span>数据量 TB</span>
+          <span>数据量 TB（业务预计体量）</span>
           <input class="tenant-input" data-mode="business" data-index="${index}" data-key="dataTb" type="number" min="0.1" step="0.1" value="${tenant.dataTb}">
         </label>
         <label class="field compact-field">
-          <span>最低分片数</span>
+          <span>最低分片数（自动建议，可手动改）</span>
           <input class="tenant-input" data-mode="business" data-index="${index}" data-key="minShards" type="number" min="1" value="${tenant.minShards}">
         </label>
       </div>
@@ -2214,7 +2217,16 @@ function bindParameterEvents() {
   const inputPanel = document.querySelector(".input-panel");
   const handleParameterChange = (event) => {
     if (event.target.matches(".tenant-input")) {
-      updateTenantSpec(event.target);
+      const update = updateTenantSpec(event.target);
+      if (!update) return;
+      if (update.mode === "business" && update.key === "dataTb") {
+        syncBusinessTenantMinShards(update.index, { force: true });
+      }
+      render({ tenantEditors: false });
+      return;
+    }
+    if (event.target.matches("#maxShardTb, #growthFactor, #years, #forceEven, #minShards")) {
+      syncBusinessTenantMinShards();
       render();
       return;
     }
@@ -2260,21 +2272,58 @@ function bindParameterEvents() {
 }
 
 function updateTenantSpec(input) {
-  const list = input.dataset.mode === "reverse" ? reverseTenantSpecs : businessTenantSpecs;
-  const target = list[Number(input.dataset.index)];
+  const mode = input.dataset.mode;
+  const index = Number(input.dataset.index);
+  const list = mode === "reverse" ? reverseTenantSpecs : businessTenantSpecs;
+  const target = list[index];
   if (!target) return;
   const key = input.dataset.key;
   const numericKeys = new Set(["qps", "dataTb", "minShards", "cnPerAz", "shardCount", "replicaCount", "cnCores", "cnMemoryGb", "dnCores", "dnMemoryGb"]);
   target[key] = numericKeys.has(key) ? Number(input.value) : input.value;
+  if (mode === "business" && key === "minShards") {
+    target.minShardsManual = true;
+  }
+  return { mode, index, key };
+}
+
+function syncBusinessTenantMinShards(index = null, options = {}) {
+  const force = Boolean(options.force);
+  const tenants = index === null
+    ? businessTenantSpecs.map((tenant, tenantIndex) => ({ tenant, tenantIndex }))
+    : [{ tenant: businessTenantSpecs[index], tenantIndex: index }];
+
+  tenants.forEach(({ tenant, tenantIndex }) => {
+    if (!tenant || (tenant.minShardsManual && !force)) return;
+    tenant.minShards = calculateSuggestedMinShards(tenant);
+    tenant.minShardsManual = false;
+    const field = document.querySelector(`.tenant-input[data-mode="business"][data-index="${tenantIndex}"][data-key="minShards"]`);
+    if (field && document.activeElement !== field) {
+      field.value = tenant.minShards;
+    }
+  });
+}
+
+function calculateSuggestedMinShards(tenant) {
+  const dataTb = Math.max(0.1, Number(tenant.dataTb) || 0.1);
+  const growthPower = Math.pow(numberValue("growthFactor"), numberValue("years"));
+  const maxShardTb = Math.max(0.1, numberValue("maxShardTb"));
+  const globalMinShards = Math.max(1, numberValue("minShards"));
+  const byCapacity = Math.ceil((dataTb * growthPower) / maxShardTb);
+  return maybeEven(Math.max(globalMinShards, byCapacity), $("forceEven").checked);
 }
 
 function createBusinessTenantSpec(index) {
-  return {
+  const tenant = {
     name: `租户${index}`,
     type: $("dbShape").value === "centralized" ? "centralized" : "distributed",
     qps: 50000,
     dataTb: 1,
-    minShards: 2
+    minShards: 2,
+    minShardsManual: false
+  };
+  tenant.minShards = calculateSuggestedMinShards(tenant);
+  return {
+    ...tenant
   };
 }
 
