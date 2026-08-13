@@ -236,6 +236,26 @@ select:focus {
   margin-bottom: 10px;
 }
 
+.parameter-advisory {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0 12px;
+  border-left: 3px solid var(--warn);
+  background: rgba(255, 200, 87, 0.06);
+  padding: 9px 10px;
+}
+
+.parameter-advisory strong {
+  color: var(--warn);
+  font-size: 11px;
+}
+
+.parameter-advisory span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
 .customer-server-config {
   margin-top: 6px;
   padding-top: 14px;
