@@ -158,7 +158,19 @@
                   <option value="dedicated">独立部署</option>
                   <option value="gtmMgrMixed">GTM + 管理节点合设</option>
                   <option value="cnDnMixed">CN + DN 混合部署</option>
-                  <option value="allMixed">CN + DN + GTM + 管理全混布</option>
+                  <option value="allMixed">全混布（仅 POC，GTM亲和优先）</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>管理节点数量</span>
+                <input id="businessManagementNodes" type="number" min="1" step="1" value="3">
+              </label>
+              <label class="field">
+                <span>GTM 部署亲和</span>
+                <select id="businessGtmAffinity">
+                  <option value="auto" selected>自动推荐</option>
+                  <option value="dedicated">独立服务器部署</option>
+                  <option value="management">与管理节点混部</option>
                 </select>
               </label>
               <label class="field">
@@ -172,6 +184,11 @@
                 <span>资源预留比例</span>
                 <input id="businessReserveRatio" type="number" min="0" max="0.8" step="0.05" value="0.35">
               </label>
+            </div>
+
+            <div class="parameter-advisory">
+              <strong>GTM 其他混部方式评估</strong>
+              <span>GTM 与 CN/DN 同机仅保留在 POC 全混布验证中；生产不作为独立推荐项。容器共享资源池不等于同机混部，仍应配置跨主机、跨故障域反亲和。</span>
             </div>
 
             <div id="customerServerConfig" class="customer-server-config hidden">
@@ -267,16 +284,35 @@
               </select>
             </label>
 
-            <label class="field">
-              <span>组件组合方式</span>
-              <select id="reverseComponentLayout">
-                <option value="auto" selected>自动推荐</option>
-                <option value="dedicated">独立部署</option>
-                <option value="gtmMgrMixed">GTM + 管理节点合设</option>
-                <option value="cnDnMixed">CN + DN 混合部署</option>
-                <option value="allMixed">CN + DN + GTM + 管理全混布</option>
-              </select>
-            </label>
+            <div class="grid-two">
+              <label class="field">
+                <span>组件组合方式</span>
+                <select id="reverseComponentLayout">
+                  <option value="auto" selected>自动推荐</option>
+                  <option value="dedicated">独立部署</option>
+                  <option value="gtmMgrMixed">GTM + 管理节点合设</option>
+                  <option value="cnDnMixed">CN + DN 混合部署</option>
+                  <option value="allMixed">全混布（仅 POC，GTM亲和优先）</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>管理节点数量</span>
+                <input id="reverseManagementNodes" type="number" min="1" step="1" value="3">
+              </label>
+              <label class="field">
+                <span>GTM 部署亲和</span>
+                <select id="reverseGtmAffinity">
+                  <option value="auto" selected>自动推荐</option>
+                  <option value="dedicated">独立服务器部署</option>
+                  <option value="management">与管理节点混部</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="parameter-advisory">
+              <strong>生产部署边界</strong>
+              <span>资源反推会优先执行 GTM 亲和策略；GTM 与 CN/DN 同机只在 POC 全混布下评估，不作为核心生产推荐。</span>
+            </div>
           </section>
         </aside>
 
@@ -381,6 +417,7 @@
               <li><strong>官方入口</strong>：<a href="https://www.goldendb.com/" target="_blank" rel="noreferrer">GoldenDB 官网</a>。</li>
               <li><strong>架构与部署形态</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/goldendb/%E9%87%91%E7%AF%86%E4%BF%A1%E7%A7%91GoldenDB%E6%95%B0%E6%8D%AE%E5%BA%93V6%E6%8A%80%E6%9C%AF%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf" target="_blank" rel="noreferrer">《GoldenDB 数据库 V6 技术白皮书》</a>，用于核对集中式/分布式组件关系、物理机/容器部署与资源弹性。</li>
               <li><strong>容量/性能规划</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/mediares/golden_db/pdf/report2024010303.pdf" target="_blank" rel="noreferrer">《GoldenDB 分布式事务型数据库金融应用指南》</a>，分片数按容量与单分片 TPS 预估共同确定。</li>
+              <li><strong>管理节点与 GTM 部署</strong>：上述金融应用指南给出单中心管理节点 3 副本、同城双中心管理节点 3 或 5 副本等规划口径；<a href="https://www.zte.com.cn/china/about/magazine/zte-technologies/2025/12/3/5.html" target="_blank" rel="noreferrer">《国有大行分布式数据库云化部署实践》</a>说明管理节点可保留物理部署、租户组件可运行于容器资源池。页面据此提供 GTM 独立或与管理节点混部，并将“共享资源池”和“同机混部”区别处理。</li>
               <li><strong>参考图参数口径</strong>：海光双路 64 物理核、1024GB、双万兆、系统盘 RAID1、NVMe 数据盘属于具体项目服务器基线，页面支持按组件录入，但不将其视为 GoldenDB 产品硬上限或所有项目的统一推荐。</li>
               <li><strong>副本高可用</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/mediares/zte/zhengqi/finance/hangyedongcha/GoldenDB.pdf" target="_blank" rel="noreferrer">《GoldenDB 分布式数据库技术白皮书》</a>，Group 由多个 DN 构成，采用一主多备。</li>
               <li><strong>架构核对</strong>：<a href="https://www.modb.pro/db/1861230042106310656" target="_blank" rel="noreferrer">GoldenDB 架构概述</a>、<a href="https://www.cnblogs.com/smart-cloud/articles/19176195" target="_blank" rel="noreferrer">GoldenDB 数据库架构与部署</a>。</li>
