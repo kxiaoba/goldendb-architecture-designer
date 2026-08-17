@@ -152,28 +152,6 @@
                 </select>
               </label>
               <label class="field">
-                <span>组件组合方式</span>
-                <select id="businessComponentLayout">
-                  <option value="auto" selected>自动推荐</option>
-                  <option value="dedicated">独立部署</option>
-                  <option value="gtmMgrMixed">GTM + 管理节点合设</option>
-                  <option value="cnDnMixed">CN + DN 混合部署</option>
-                  <option value="allMixed">全混布（仅 POC，GTM亲和优先）</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>管理节点数量</span>
-                <input id="businessManagementNodes" type="number" min="1" step="1" value="3">
-              </label>
-              <label class="field">
-                <span>GTM 部署亲和</span>
-                <select id="businessGtmAffinity">
-                  <option value="auto" selected>自动推荐</option>
-                  <option value="dedicated">独立服务器部署</option>
-                  <option value="management">与管理节点混部</option>
-                </select>
-              </label>
-              <label class="field">
                 <span>服务器规格来源</span>
                 <select id="businessServerConfigMode">
                   <option value="recommended" selected>跳过录入，使用组件推荐规格</option>
@@ -186,9 +164,97 @@
               </label>
             </div>
 
-            <div class="parameter-advisory">
-              <strong>GTM 其他混部方式评估</strong>
-              <span>GTM 与 CN/DN 同机仅保留在 POC 全混布验证中；生产不作为独立推荐项。容器共享资源池不等于同机混部，仍应配置跨主机、跨故障域反亲和。</span>
+            <div class="control-plane-settings">
+              <div class="section-label">管理面与事务控制（可修改）</div>
+              <div class="grid-two">
+                <label class="field">
+                  <span>管理节点总数</span>
+                  <input id="businessManagementNodes" type="number" min="1" step="1" value="3">
+                </label>
+                <label class="field">
+                  <span>每 GTM Group 副本数</span>
+                  <input id="businessGtmReplicasPerGroup" type="number" min="0" step="1" value="0">
+                  <small>输入 0 使用当前环境推荐值；正整数按手工值计算。</small>
+                </label>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="section-label">资源缩减与组件融合</div>
+            <div class="resource-reduction-panel">
+              <div class="grid-two">
+                <label class="field">
+                  <span>缩减方案模板</span>
+                  <select id="businessReductionPreset">
+                    <option value="current" selected>默认稳健规则</option>
+                    <option value="safe">稳健缩减</option>
+                    <option value="balanced">均衡缩减</option>
+                    <option value="maximum">最大缩减（仅 POC）</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>单机同租户 DN 上限</span>
+                  <input id="businessMaxTenantDnPerServer" type="number" min="1" step="1" value="2">
+                </label>
+                <label class="field">
+                  <span>CN 跨租户部署策略</span>
+                  <select id="businessCnTenantPlacement">
+                    <option value="auto" selected>自动：生产隔离 / POC 混部</option>
+                    <option value="isolated">租户独立：CN 服务器不跨租户</option>
+                    <option value="shared">资源混部：不同租户 CN 共享服务器</option>
+                  </select>
+                </label>
+                <label class="field hidden" aria-hidden="true">
+                  <span>组件组合方式（自动派生）</span>
+                  <select id="businessComponentLayout" tabindex="-1">
+                    <option value="auto" selected>自动推荐</option>
+                    <option value="dedicated">独立部署</option>
+                    <option value="gtmMgrMixed">GTM + 管理节点合设</option>
+                    <option value="cnDnMixed">CN + DN 混合部署</option>
+                    <option value="allMixed">全混布（仅 POC）</option>
+                  </select>
+                </label>
+                <label class="field hidden" aria-hidden="true">
+                  <span>GTM 部署亲和（自动派生）</span>
+                  <select id="businessGtmAffinity" tabindex="-1">
+                    <option value="auto" selected>自动推荐</option>
+                    <option value="dedicated">独立服务器部署</option>
+                    <option value="management">与管理节点混部</option>
+                  </select>
+                </label>
+              </div>
+              <div class="resource-toggle-grid">
+                <label class="toggle">
+                  <input id="businessAllowShardColocation" type="checkbox" checked>
+                  <span>同租户不同 Group 的 DN 优先装箱到同一服务器</span>
+                </label>
+                <label class="toggle">
+                  <input id="businessAllowCnDnMixed" type="checkbox">
+                  <span>CN 与 DN 混部</span>
+                </label>
+                <label class="toggle">
+                  <input id="businessAllowGtmManagementMixed" type="checkbox" checked>
+                  <span>GTM 与管理节点混部</span>
+                </label>
+                <label class="toggle">
+                  <input id="businessAllowAllMixed" type="checkbox">
+                  <span>CN / DN / GTM / 管理全混布（仅 POC）</span>
+                </label>
+                <label class="toggle hard-constraint">
+                  <input type="checkbox" checked disabled>
+                  <span>同一 Group 的主从副本必须跨物理服务器</span>
+                </label>
+              </div>
+              <div class="resource-redline-rules">
+                <strong>实时红线</strong>
+                <span>同一 DN Group 或 GTM Group 副本同机、生产全混布、管理节点不足、服务器资源不足时，方案判定为不通过并要求修改。</span>
+              </div>
+              <div class="parameter-advisory">
+                <strong>生产部署边界</strong>
+                <span>跨租户 CN 混部不改变 CN 的租户归属，生产使用时必须配置 CPU/内存配额、容量余量和故障接管能力；核心租户建议使用独立 CN 服务器。CN/DN 混部和同租户多分片共宿还需满足磁盘、IOPS 与网络水位。</span>
+              </div>
             </div>
 
             <div id="customerServerConfig" class="customer-server-config hidden">
@@ -275,6 +341,21 @@
               </label>
             </div>
 
+            <div class="control-plane-settings">
+              <div class="section-label">管理面与事务控制（可修改）</div>
+              <div class="grid-two">
+                <label class="field">
+                  <span>管理节点总数</span>
+                  <input id="reverseManagementNodes" type="number" min="1" step="1" value="3">
+                </label>
+                <label class="field">
+                  <span>每 GTM Group 副本数</span>
+                  <input id="reverseGtmReplicasPerGroup" type="number" min="0" step="1" value="0">
+                  <small>输入 0 使用当前环境推荐值；正整数按手工值计算。</small>
+                </label>
+              </div>
+            </div>
+
             <label class="field">
               <span>GTM 绑定模式</span>
               <select id="reverseGtmBindMode">
@@ -284,34 +365,82 @@
               </select>
             </label>
 
-            <div class="grid-two">
-              <label class="field">
-                <span>组件组合方式</span>
-                <select id="reverseComponentLayout">
-                  <option value="auto" selected>自动推荐</option>
-                  <option value="dedicated">独立部署</option>
-                  <option value="gtmMgrMixed">GTM + 管理节点合设</option>
-                  <option value="cnDnMixed">CN + DN 混合部署</option>
-                  <option value="allMixed">全混布（仅 POC，GTM亲和优先）</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>管理节点数量</span>
-                <input id="reverseManagementNodes" type="number" min="1" step="1" value="3">
-              </label>
-              <label class="field">
-                <span>GTM 部署亲和</span>
-                <select id="reverseGtmAffinity">
-                  <option value="auto" selected>自动推荐</option>
-                  <option value="dedicated">独立服务器部署</option>
-                  <option value="management">与管理节点混部</option>
-                </select>
-              </label>
-            </div>
+            <div class="divider"></div>
 
-            <div class="parameter-advisory">
-              <strong>生产部署边界</strong>
-              <span>资源反推会优先执行 GTM 亲和策略；GTM 与 CN/DN 同机只在 POC 全混布下评估，不作为核心生产推荐。</span>
+            <div class="section-label">资源缩减与组件融合</div>
+            <div class="resource-reduction-panel">
+              <div class="grid-two">
+                <label class="field">
+                  <span>缩减方案模板</span>
+                  <select id="reverseReductionPreset">
+                    <option value="current" selected>默认稳健规则</option>
+                    <option value="safe">稳健缩减</option>
+                    <option value="balanced">均衡缩减</option>
+                    <option value="maximum">最大缩减（仅 POC）</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>单机同租户 DN 上限</span>
+                  <input id="reverseMaxTenantDnPerServer" type="number" min="1" step="1" value="2">
+                </label>
+                <label class="field">
+                  <span>CN 跨租户部署策略</span>
+                  <select id="reverseCnTenantPlacement">
+                    <option value="auto" selected>自动：生产隔离 / POC 混部</option>
+                    <option value="isolated">租户独立：CN 服务器不跨租户</option>
+                    <option value="shared">资源混部：不同租户 CN 共享服务器</option>
+                  </select>
+                </label>
+                <label class="field hidden" aria-hidden="true">
+                  <span>组件组合方式（自动派生）</span>
+                  <select id="reverseComponentLayout" tabindex="-1">
+                    <option value="auto" selected>自动推荐</option>
+                    <option value="dedicated">独立部署</option>
+                    <option value="gtmMgrMixed">GTM + 管理节点合设</option>
+                    <option value="cnDnMixed">CN + DN 混合部署</option>
+                    <option value="allMixed">全混布（仅 POC）</option>
+                  </select>
+                </label>
+                <label class="field hidden" aria-hidden="true">
+                  <span>GTM 部署亲和（自动派生）</span>
+                  <select id="reverseGtmAffinity" tabindex="-1">
+                    <option value="auto" selected>自动推荐</option>
+                    <option value="dedicated">独立服务器部署</option>
+                    <option value="management">与管理节点混部</option>
+                  </select>
+                </label>
+              </div>
+              <div class="resource-toggle-grid">
+                <label class="toggle">
+                  <input id="reverseAllowShardColocation" type="checkbox" checked>
+                  <span>同租户不同 Group 的 DN 优先装箱到同一服务器</span>
+                </label>
+                <label class="toggle">
+                  <input id="reverseAllowCnDnMixed" type="checkbox">
+                  <span>CN 与 DN 混部</span>
+                </label>
+                <label class="toggle">
+                  <input id="reverseAllowGtmManagementMixed" type="checkbox" checked>
+                  <span>GTM 与管理节点混部</span>
+                </label>
+                <label class="toggle">
+                  <input id="reverseAllowAllMixed" type="checkbox">
+                  <span>CN / DN / GTM / 管理全混布（仅 POC）</span>
+                </label>
+                <label class="toggle hard-constraint">
+                  <input type="checkbox" checked disabled>
+                  <span>同一 Group 的主从副本必须跨物理服务器</span>
+                </label>
+              </div>
+              <div class="resource-redline-rules">
+                <strong>实时红线</strong>
+                <span>同一 DN Group 或 GTM Group 副本同机、生产全混布、管理节点不足、服务器资源不足时，方案判定为不通过并要求修改。</span>
+              </div>
+              <div class="parameter-advisory">
+                <strong>资源缩减边界</strong>
+                <span>资源反推仍以服务器总数为硬约束；跨租户 CN 混部只共享物理服务器，不共享租户实例。若服务器不足以满足 CN 租户隔离或同一 Group 副本反亲和，方案直接判定为高风险。</span>
+              </div>
             </div>
           </section>
         </aside>
@@ -402,6 +531,11 @@
           </div>
 
           <div class="output-block">
+            <h3>资源缩减与组件融合评估</h3>
+            <div id="reductionPlan" class="reduction-plan" aria-live="polite"></div>
+          </div>
+
+          <div class="output-block">
             <h3>风险与校验</h3>
             <ul id="riskList" class="risk-list"></ul>
           </div>
@@ -418,6 +552,8 @@
               <li><strong>架构与部署形态</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/goldendb/%E9%87%91%E7%AF%86%E4%BF%A1%E7%A7%91GoldenDB%E6%95%B0%E6%8D%AE%E5%BA%93V6%E6%8A%80%E6%9C%AF%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf" target="_blank" rel="noreferrer">《GoldenDB 数据库 V6 技术白皮书》</a>，用于核对集中式/分布式组件关系、物理机/容器部署与资源弹性。</li>
               <li><strong>容量/性能规划</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/mediares/golden_db/pdf/report2024010303.pdf" target="_blank" rel="noreferrer">《GoldenDB 分布式事务型数据库金融应用指南》</a>，分片数按容量与单分片 TPS 预估共同确定。</li>
               <li><strong>管理节点与 GTM 部署</strong>：上述金融应用指南给出单中心管理节点 3 副本、同城双中心管理节点 3 或 5 副本等规划口径；<a href="https://www.zte.com.cn/china/about/magazine/zte-technologies/2025/12/3/5.html" target="_blank" rel="noreferrer">《国有大行分布式数据库云化部署实践》</a>说明管理节点可保留物理部署、租户组件可运行于容器资源池。页面据此提供 GTM 独立或与管理节点混部，并将“共享资源池”和“同机混部”区别处理。</li>
+              <li><strong>资源缩减边界</strong>：金融应用指南公开示例采用 Insight 与 GTM 合设，并按组件性能/容量共同确定服务器数；上述云化部署实践说明 CN、DN、GTM 可容器化并共享硬件资源池。页面仅把不同 Group 共宿、CN/DN 混部作为资源装箱策略，同一 Group 主从副本仍保持物理服务器反亲和。</li>
+              <li><strong>CN 跨租户部署</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/goldendb/260423-%E5%86%85%E5%AE%B9%E6%9B%B4%E6%96%B0%E7%B4%A0%E6%9D%90/%E4%B8%AD%E5%85%B4%E9%80%9A%E8%AE%AFGoldenDB%E6%95%B0%E6%8D%AE%E5%BA%93V6%E6%8A%80%E6%9C%AF%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf" target="_blank" rel="noreferrer">GoldenDB V6 技术白皮书</a>说明租户包含 CN/DN/GTM、租户资源与数据隔离，同时支持物理机及容器化部署。页面据此区分“CN 实例归属隔离”和“不同租户 CN 共享物理服务器”，生产自动采用租户独立服务器。</li>
               <li><strong>参考图参数口径</strong>：海光双路 64 物理核、1024GB、双万兆、系统盘 RAID1、NVMe 数据盘属于具体项目服务器基线，页面支持按组件录入，但不将其视为 GoldenDB 产品硬上限或所有项目的统一推荐。</li>
               <li><strong>副本高可用</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/mediares/zte/zhengqi/finance/hangyedongcha/GoldenDB.pdf" target="_blank" rel="noreferrer">《GoldenDB 分布式数据库技术白皮书》</a>，Group 由多个 DN 构成，采用一主多备。</li>
               <li><strong>架构核对</strong>：<a href="https://www.modb.pro/db/1861230042106310656" target="_blank" rel="noreferrer">GoldenDB 架构概述</a>、<a href="https://www.cnblogs.com/smart-cloud/articles/19176195" target="_blank" rel="noreferrer">GoldenDB 数据库架构与部署</a>。</li>
