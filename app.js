@@ -43,9 +43,17 @@ const inputs = [
   "safeShardTps",
   "forceEven",
   "businessServerProfile",
+  "businessReductionPreset",
   "businessComponentLayout",
   "businessManagementNodes",
+  "businessGtmReplicasPerGroup",
   "businessGtmAffinity",
+  "businessMaxTenantDnPerServer",
+  "businessCnTenantPlacement",
+  "businessAllowShardColocation",
+  "businessAllowCnDnMixed",
+  "businessAllowGtmManagementMixed",
+  "businessAllowAllMixed",
   "businessServerConfigMode",
   "businessReserveRatio",
   "reverseDeploymentMode",
@@ -59,9 +67,17 @@ const inputs = [
   "reverseMaxDnPerServer",
   "reverseMaxCnPerServer",
   "reverseGtmBindMode",
+  "reverseReductionPreset",
   "reverseComponentLayout",
   "reverseManagementNodes",
+  "reverseGtmReplicasPerGroup",
   "reverseGtmAffinity",
+  "reverseMaxTenantDnPerServer",
+  "reverseCnTenantPlacement",
+  "reverseAllowShardColocation",
+  "reverseAllowCnDnMixed",
+  "reverseAllowGtmManagementMixed",
+  "reverseAllowAllMixed",
   ...componentServerInputIds
 ];
 
@@ -117,6 +133,19 @@ const gtmAffinityLabels = {
   tenantPool: "GTM 随租户组件全混布（仅 POC）"
 };
 
+const reductionPresetLabels = {
+  current: "默认稳健规则",
+  safe: "稳健缩减",
+  balanced: "均衡缩减",
+  maximum: "最大缩减",
+  custom: "自定义"
+};
+
+const cnTenantPlacementLabels = {
+  isolated: "租户独立 CN 服务器",
+  shared: "不同租户 CN 共享服务器"
+};
+
 const defaults = {
   designModule: "business",
   environmentType: "production",
@@ -133,9 +162,17 @@ const defaults = {
   safeShardTps: 4000,
   forceEven: true,
   businessServerProfile: "balanced",
+  businessReductionPreset: "current",
   businessComponentLayout: "auto",
   businessManagementNodes: 3,
+  businessGtmReplicasPerGroup: 0,
   businessGtmAffinity: "auto",
+  businessMaxTenantDnPerServer: 2,
+  businessCnTenantPlacement: "auto",
+  businessAllowShardColocation: true,
+  businessAllowCnDnMixed: false,
+  businessAllowGtmManagementMixed: true,
+  businessAllowAllMixed: false,
   businessServerConfigMode: "recommended",
   businessReserveRatio: 0.35,
   reverseDeploymentMode: "twoSiteThreeDc",
@@ -149,9 +186,17 @@ const defaults = {
   reverseMaxDnPerServer: 2,
   reverseMaxCnPerServer: 2,
   reverseGtmBindMode: "auto",
+  reverseReductionPreset: "current",
   reverseComponentLayout: "auto",
   reverseManagementNodes: 3,
-  reverseGtmAffinity: "auto"
+  reverseGtmReplicasPerGroup: 0,
+  reverseGtmAffinity: "auto",
+  reverseMaxTenantDnPerServer: 2,
+  reverseCnTenantPlacement: "auto",
+  reverseAllowShardColocation: true,
+  reverseAllowCnDnMixed: false,
+  reverseAllowGtmManagementMixed: true,
+  reverseAllowAllMixed: false
 };
 
 componentServerDefinitions.forEach((definition) => {
@@ -204,6 +249,74 @@ function maybeEven(value, forceEven) {
   return forceEven ? evenUp(value) : Math.ceil(value);
 }
 
+function getResourceReductionConfig(prefix, environment, maxDnPerServer) {
+  const preset = $(`${prefix}ReductionPreset`).value;
+  const configuredCnTenantPlacement = $(`${prefix}CnTenantPlacement`).value;
+  const cnTenantPlacement = configuredCnTenantPlacement === "auto"
+    ? (environment === "production" ? "isolated" : "shared")
+    : configuredCnTenantPlacement;
+  const allowShardColocation = $(`${prefix}AllowShardColocation`).checked;
+  const allowCnDnMixed = $(`${prefix}AllowCnDnMixed`).checked;
+  const allowGtmManagementMixed = $(`${prefix}AllowGtmManagementMixed`).checked;
+  const allowAllMixed = $(`${prefix}AllowAllMixed`).checked;
+  const configuredTenantLimit = integerValue(`${prefix}MaxTenantDnPerServer`, 1);
+  let requestedComponentLayout = "dedicated";
+  let requestedGtmAffinity = "dedicated";
+  if (allowAllMixed) {
+    requestedComponentLayout = "allMixed";
+    requestedGtmAffinity = "auto";
+  } else {
+    if (allowCnDnMixed) requestedComponentLayout = "cnDnMixed";
+    if (allowGtmManagementMixed) requestedGtmAffinity = "management";
+  }
+  const effectiveTenantLimit = allowShardColocation
+    ? Math.min(maxDnPerServer, configuredTenantLimit)
+    : 1;
+  const productionMaximumRedline = environment === "production" && allowAllMixed;
+
+  return {
+    preset,
+    presetLabel: reductionPresetLabels[preset] || reductionPresetLabels.custom,
+    requestedComponentLayout,
+    requestedGtmAffinity,
+    configuredCnTenantPlacement,
+    cnTenantPlacement,
+    cnTenantPlacementLabel: cnTenantPlacementLabels[cnTenantPlacement],
+    allowCnTenantColocation: cnTenantPlacement === "shared",
+    allowShardColocation,
+    allowCnDnMixed,
+    allowGtmManagementMixed,
+    allowAllMixed,
+    configuredTenantLimit,
+    maxDnPerServer,
+    maxTenantDnPerServer: effectiveTenantLimit,
+    densityCapped: allowShardColocation && configuredTenantLimit > maxDnPerServer,
+    productionMaximumRedline,
+    note: productionMaximumRedline
+      ? "生产环境触发全混布红线，请取消全组件混部或切换为 POC 环境。"
+      : "资源缩减只调整物理服务器装箱，不改变 CN、分片和副本的业务计算结果。"
+  };
+}
+
+function getDnPlacementFloors(tenantPlans, maxTenantDnPerServer) {
+  return {
+    antiAffinityFloor: Math.max(0, ...tenantPlans.map((tenant) => tenant.replicasPerShard)),
+    tenantHostFloor: Math.max(0, ...tenantPlans.map((tenant) =>
+      Math.ceil(tenant.dnInstances / Math.max(1, maxTenantDnPerServer))
+    ))
+  };
+}
+
+function getCnPlacementFloors(tenantPlans, azCount, maxCnPerServer, cnTenantPlacement) {
+  if (cnTenantPlacement !== "isolated") return {};
+  return {
+    isolationFloor: tenantPlans.reduce(
+      (sum, tenant) => sum + Math.ceil(tenant.cnPerAz / Math.max(1, maxCnPerServer)) * azCount,
+      0
+    )
+  };
+}
+
 function calculate() {
   const environment = $("environmentType").value;
   const mode = $("deploymentMode").value;
@@ -219,11 +332,12 @@ function calculate() {
   const safeShardTps = numberValue("safeShardTps");
   const forceEven = $("forceEven").checked;
   const serverProfile = $("businessServerProfile").value;
-  const requestedComponentLayout = $("businessComponentLayout").value;
-  const requestedGtmAffinity = $("businessGtmAffinity").value;
   const serverConfigMode = $("businessServerConfigMode").value;
   const reserveRatio = Math.min(0.8, Math.max(0, numberValue("businessReserveRatio")));
   const componentSpecs = getBusinessComponentSpecs({ serverConfigMode, cpuCores, serverProfile });
+  const resourceReduction = getResourceReductionConfig("business", environment, componentSpecs.dn.maxInstances);
+  const requestedComponentLayout = resourceReduction.requestedComponentLayout;
+  const requestedGtmAffinity = resourceReduction.requestedGtmAffinity;
 
   const growthPower = Math.pow(growthFactor, years);
   const cnSingleNodeTps = singleCoreTps * cpuCores * cpuLimit;
@@ -260,7 +374,12 @@ function calculate() {
   const minShards = tenantPlans.reduce((sum, tenant) => sum + tenant.minShards, 0);
   const cnRaw = tenantPlans.reduce((sum, tenant) => sum + tenant.cnRaw, 0);
   const gtmBinding = getGtmBinding(shape, distributedTenants, gtmBindMode);
-  const gtmNodes = getBusinessGtmNodes(shape, mode, gtmBinding, environment);
+  const recommendedGtmReplicasPerGroup = getRecommendedBusinessGtmReplicas(environment, mode);
+  const configuredGtmReplicasPerGroup = integerValue("businessGtmReplicasPerGroup", 0);
+  const gtmReplicasPerGroup = configuredGtmReplicasPerGroup || recommendedGtmReplicasPerGroup;
+  const gtmNodes = shape === "distributed" && gtmBinding.kind !== "none"
+    ? gtmBinding.groupCount * gtmReplicasPerGroup
+    : 0;
   applyGtmLabels(tenantPlans, gtmBinding, gtmNodes);
   const gtmPerPrimaryAz = shape === "distributed" && distributedTenants > 0
     ? Math.max(1, Math.ceil(gtmNodes / Math.max(1, azCount - 1)))
@@ -279,10 +398,12 @@ function calculate() {
     totalCn,
     dnInstances,
     gtmNodes,
+    gtmBinding,
     managementNodes,
     futureDataTb,
     maxShardTb,
-    tenantPlans
+    tenantPlans,
+    resourceReduction
   });
 
   return {
@@ -324,11 +445,15 @@ function calculate() {
     totalCn,
     gtmBinding,
     gtmNodes,
+    gtmReplicasPerGroup,
+    configuredGtmReplicasPerGroup,
+    recommendedGtmReplicasPerGroup,
     tenantPlans,
     serverProfile,
     serverConfigMode,
     componentSpecs,
     reserveRatio,
+    resourceReduction,
     serverSizing: businessServerPlan
   };
 }
@@ -345,8 +470,6 @@ function calculateReverse() {
   const reserveRatio = Math.min(0.8, Math.max(0, numberValue("reverseReserveRatio")));
   const maxDnPerServer = integerValue("reverseMaxDnPerServer", 1);
   const maxCnPerServer = integerValue("reverseMaxCnPerServer", 1);
-  const requestedComponentLayout = $("reverseComponentLayout").value;
-  const requestedGtmAffinity = $("reverseGtmAffinity").value;
   const azCount = getAzCount(mode);
   const minReplica = getMinimumReplicaCount(environment, mode);
   const tenantPlans = buildReverseTenantPlans({
@@ -366,7 +489,10 @@ function calculateReverse() {
   const managementNodes = integerValue("reverseManagementNodes", 1);
   const recommendedManagementNodes = getRecommendedManagementNodes(environment, mode);
   const gtmBinding = getGtmBinding("distributed", distributedTenants, $("reverseGtmBindMode").value);
-  const gtmNodes = getReverseGtmNodes(environment, gtmBinding);
+  const recommendedGtmReplicasPerGroup = getRecommendedReverseGtmReplicas(environment);
+  const configuredGtmReplicasPerGroup = integerValue("reverseGtmReplicasPerGroup", 0);
+  const gtmReplicasPerGroup = configuredGtmReplicasPerGroup || recommendedGtmReplicasPerGroup;
+  const gtmNodes = gtmBinding.kind === "none" ? 0 : gtmBinding.groupCount * gtmReplicasPerGroup;
   applyGtmLabels(tenantPlans, gtmBinding, gtmNodes);
   const cnPerAz = tenantPlans.reduce((sum, tenant) => sum + tenant.cnPerAz, 0);
   const totalCn = cnPerAz * azCount;
@@ -402,20 +528,38 @@ function calculateReverse() {
     diskTb,
     maxInstances: key === "cn" ? maxCnPerServer : key === "dn" ? maxDnPerServer : key === "gtm" ? 2 : 1
   }]));
+  const resourceReduction = getResourceReductionConfig("reverse", environment, maxDnPerServer);
+  const requestedComponentLayout = resourceReduction.requestedComponentLayout;
+  const requestedGtmAffinity = resourceReduction.requestedGtmAffinity;
+  const dnPlacementFloors = getDnPlacementFloors(tenantPlans, resourceReduction.maxTenantDnPerServer);
+  const cnPlacementFloors = getCnPlacementFloors(
+    tenantPlans,
+    azCount,
+    maxCnPerServer,
+    resourceReduction.cnTenantPlacement
+  );
   const reverseComponentDemands = {
     cn: {
       instances: totalCn,
       cpuCores: tenantPlans.reduce((sum, tenant) => sum + tenant.cnCpuDemand, 0),
       memoryGb: tenantPlans.reduce((sum, tenant) => sum + tenant.cnMemoryDemand, 0),
-      diskTb: 0
+      diskTb: 0,
+      ...cnPlacementFloors
     },
     dn: {
       instances: actualDnInstances,
       cpuCores: tenantPlans.reduce((sum, tenant) => sum + tenant.dnCpuDemand, 0),
       memoryGb: tenantPlans.reduce((sum, tenant) => sum + tenant.dnMemoryDemand, 0),
-      diskTb: 0
+      diskTb: 0,
+      ...dnPlacementFloors
     },
-    gtm: { instances: gtmNodes, cpuCores: gtmNodes * 4, memoryGb: gtmNodes * 8, diskTb: 0 },
+    gtm: {
+      instances: gtmNodes,
+      cpuCores: gtmNodes * 4,
+      memoryGb: gtmNodes * 8,
+      diskTb: 0,
+      antiAffinityFloor: gtmBinding.groupCount ? Math.ceil(gtmNodes / gtmBinding.groupCount) : 0
+    },
     management: { instances: managementNodes, cpuCores: managementNodes * 4, memoryGb: managementNodes * 8, diskTb: 0 }
   };
   const reverseLayoutResolution = resolveBusinessComponentLayout(
@@ -451,10 +595,18 @@ function calculateReverse() {
     dnInstances: actualDnInstances,
     tenantPlans,
     gtmNodes,
+    gtmBinding,
     managementNodes,
     maxDnPerServer,
-    maxCnPerServer
+    maxCnPerServer,
+    maxTenantDnPerServer: resourceReduction.maxTenantDnPerServer,
+    allowShardColocation: resourceReduction.allowShardColocation,
+    cnTenantPlacement: resourceReduction.cnTenantPlacement
   });
+  const cnTenantIsolationViolations = getCnTenantIsolationViolations(serverPlan, resourceReduction.cnTenantPlacement);
+  const dnReplicaHostViolations = getDnReplicaHostViolations(serverPlan);
+  const gtmReplicaHostViolations = getGtmReplicaHostViolations(serverPlan);
+  const managementHostViolations = getManagementHostViolations(serverPlan);
   const scores = scoreReversePlan({
     environment,
     goal,
@@ -490,6 +642,11 @@ function calculateReverse() {
     componentSizing,
     maxDnPerServer,
     maxCnPerServer,
+    resourceReduction,
+    cnTenantIsolationViolations,
+    dnReplicaHostViolations,
+    gtmReplicaHostViolations,
+    managementHostViolations,
     allowColocation,
     requestedReplicas,
     requestedDistributedTenants,
@@ -508,6 +665,9 @@ function calculateReverse() {
     totalCn,
     gtmBinding,
     gtmNodes,
+    gtmReplicasPerGroup,
+    configuredGtmReplicasPerGroup,
+    recommendedGtmReplicasPerGroup,
     tenantPlans,
     requiredServerCount,
     requiredDedicatedServers,
@@ -543,10 +703,13 @@ function getRecommendedManagementNodes(environment, mode) {
   return 3;
 }
 
+function getRecommendedReverseGtmReplicas(environment) {
+  return environment === "poc" ? 1 : 2;
+}
+
 function getReverseGtmNodes(environment, binding) {
   if (binding.kind === "none") return 0;
-  const perGroup = environment === "poc" ? 1 : 2;
-  return Math.max(perGroup, binding.groupCount * perGroup);
+  return binding.groupCount * getRecommendedReverseGtmReplicas(environment);
 }
 
 function getReverseCnPerAz(environment, goal, serverCount, azCount) {
@@ -634,20 +797,42 @@ function buildBusinessServerSizing(config) {
     (sum, tenant) => sum + tenant.futureDataTb * tenant.replicasPerShard,
     0
   );
+  const dnPlacementFloors = getDnPlacementFloors(
+    config.tenantPlans,
+    config.resourceReduction.maxTenantDnPerServer
+  );
+  const maxCnPerServer = config.componentSpecs.cn.maxInstances;
+  const maxDnPerServer = config.componentSpecs.dn.maxInstances;
+  const cnPlacementFloors = getCnPlacementFloors(
+    config.tenantPlans,
+    config.azCount,
+    maxCnPerServer,
+    config.resourceReduction.cnTenantPlacement
+  );
   const componentDemands = {
     cn: {
       instances: config.totalCn,
       cpuCores: config.tenantPlans.reduce((sum, tenant) => sum + tenant.cnCpuDemand, 0),
       memoryGb: config.tenantPlans.reduce((sum, tenant) => sum + tenant.cnMemoryDemand, 0),
-      diskTb: 0
+      diskTb: 0,
+      ...cnPlacementFloors
     },
     dn: {
       instances: config.dnInstances,
       cpuCores: config.tenantPlans.reduce((sum, tenant) => sum + tenant.dnCpuDemand, 0),
       memoryGb: config.tenantPlans.reduce((sum, tenant) => sum + tenant.dnMemoryDemand, 0),
-      diskTb: storedDataTb
+      diskTb: storedDataTb,
+      ...dnPlacementFloors
     },
-    gtm: { instances: config.gtmNodes, cpuCores: config.gtmNodes * 4, memoryGb: config.gtmNodes * 8, diskTb: 0 },
+    gtm: {
+      instances: config.gtmNodes,
+      cpuCores: config.gtmNodes * 4,
+      memoryGb: config.gtmNodes * 8,
+      diskTb: 0,
+      antiAffinityFloor: config.gtmBinding.groupCount
+        ? Math.ceil(config.gtmNodes / config.gtmBinding.groupCount)
+        : 0
+    },
     management: { instances: config.managementNodes, cpuCores: config.managementNodes * 4, memoryGb: config.managementNodes * 8, diskTb: 0 }
   };
   const layoutResolution = resolveBusinessComponentLayout(
@@ -666,8 +851,6 @@ function buildBusinessServerSizing(config) {
     componentDemands,
     reserveRatio: config.reserveRatio
   });
-  const maxCnPerServer = config.componentSpecs.cn.maxInstances;
-  const maxDnPerServer = config.componentSpecs.dn.maxInstances;
   const serverPlan = buildBusinessPhysicalServerPlan({
     azCount: config.azCount,
     mode: config.mode,
@@ -679,10 +862,18 @@ function buildBusinessServerSizing(config) {
     dnInstances: config.dnInstances,
     tenantPlans: config.tenantPlans,
     gtmNodes: config.gtmNodes,
+    gtmBinding: config.gtmBinding,
     managementNodes: config.managementNodes,
     maxDnPerServer,
-    maxCnPerServer
+    maxCnPerServer,
+    maxTenantDnPerServer: config.resourceReduction.maxTenantDnPerServer,
+    allowShardColocation: config.resourceReduction.allowShardColocation,
+    cnTenantPlacement: config.resourceReduction.cnTenantPlacement
   });
+  const cnTenantIsolationViolations = getCnTenantIsolationViolations(serverPlan, config.resourceReduction.cnTenantPlacement);
+  const dnReplicaHostViolations = getDnReplicaHostViolations(serverPlan);
+  const gtmReplicaHostViolations = getGtmReplicaHostViolations(serverPlan);
+  const managementHostViolations = getManagementHostViolations(serverPlan);
 
   return {
     profile: config.serverProfile,
@@ -692,6 +883,7 @@ function buildBusinessServerSizing(config) {
     componentDemands,
     requestedComponentLayout: config.requestedComponentLayout,
     requestedGtmAffinity: config.requestedGtmAffinity,
+    resourceReduction: config.resourceReduction,
     componentLayout: componentSizing.effectiveLayout,
     componentLayoutLabel: componentSizing.effectiveLabel,
     componentLayoutNote: componentSizing.note,
@@ -707,6 +899,10 @@ function buildBusinessServerSizing(config) {
     memoryDemandGb: Object.values(componentDemands).reduce((sum, demand) => sum + demand.memoryGb, 0),
     ...componentSizing,
     serverPlan,
+    cnTenantIsolationViolations,
+    dnReplicaHostViolations,
+    gtmReplicaHostViolations,
+    managementHostViolations,
     perAzServers: getServerCountByAz(serverPlan, config.mode, config.azCount),
     deploymentStyle: componentSizing.effectiveLabel
   };
@@ -725,6 +921,15 @@ function calculateComponentServerCounts(config) {
   const gtmServers = requirements.gtm.servers;
   const managementServers = requirements.management.servers;
   const dedicatedServers = cnServers + dnServers + gtmServers + managementServers;
+  const strictDnRequirement = calculateComponentRequirement(
+    config.componentDemands.dn,
+    { ...config.componentSpecs.dn, maxInstances: 1 },
+    config.reserveRatio
+  );
+  const strictBaselineServers = Math.max(
+    config.azCount,
+    cnServers + strictDnRequirement.servers + gtmServers + managementServers
+  );
   const gtmManagementHostServers = calculateMixedServerCount(["gtm", "management"], config);
   const cnDnHostServers = calculateMixedServerCount(["cn", "dn"], config);
   const allComponentHostServers = calculateMixedServerCount(["cn", "dn", "gtm", "management"], config);
@@ -740,6 +945,8 @@ function calculateComponentServerCounts(config) {
     allMixed: allMixedServers
   }[effectiveLayout];
   const recommendedServers = Math.max(config.azCount, layoutServers);
+  const savedServers = Math.max(0, strictBaselineServers - recommendedServers);
+  const savingRatio = strictBaselineServers ? savedServers / strictBaselineServers : 0;
 
   return {
     effectiveLayout,
@@ -758,6 +965,9 @@ function calculateComponentServerCounts(config) {
     cnDnHostServers,
     allComponentHostServers,
     dedicatedServers,
+    strictBaselineServers,
+    savedServers,
+    savingRatio,
     gtmMgrMixedServers,
     cnDnMixedServers,
     cnDnGtmMgrMixedServers,
@@ -772,7 +982,7 @@ function calculateComponentServerCounts(config) {
 
 function calculateComponentRequirement(demand, spec, reserveRatio) {
   if (!demand.instances) {
-    return { servers: 0, byInstances: 0, byCpu: 0, byMemory: 0, byDisk: 0, usableCores: 0, usableMemoryGb: 0, usableDiskTb: 0 };
+    return { servers: 0, byInstances: 0, byCpu: 0, byMemory: 0, byDisk: 0, byAffinity: 0, usableCores: 0, usableMemoryGb: 0, usableDiskTb: 0 };
   }
   const usableCores = Math.max(1, Math.floor(spec.cores * (1 - reserveRatio)));
   const usableMemoryGb = Math.max(1, Math.floor(spec.memoryGb * (1 - reserveRatio)));
@@ -781,12 +991,18 @@ function calculateComponentRequirement(demand, spec, reserveRatio) {
   const byCpu = Math.ceil(demand.cpuCores / usableCores);
   const byMemory = Math.ceil(demand.memoryGb / usableMemoryGb);
   const byDisk = demand.diskTb ? Math.ceil(demand.diskTb / usableDiskTb) : 0;
+  const byAffinity = Math.max(
+    demand.antiAffinityFloor || 0,
+    demand.tenantHostFloor || 0,
+    demand.isolationFloor || 0
+  );
   return {
-    servers: Math.max(byInstances, byCpu, byMemory, byDisk),
+    servers: Math.max(byInstances, byCpu, byMemory, byDisk, byAffinity),
     byInstances,
     byCpu,
     byMemory,
     byDisk,
+    byAffinity,
     usableCores,
     usableMemoryGb,
     usableDiskTb
@@ -813,10 +1029,15 @@ function calculateMixedServerCount(keys, config) {
   const usableMemoryGb = Math.max(1, Math.floor(hostSpec.memoryGb * (1 - config.reserveRatio)));
   const usableDiskTb = Math.max(0.1, hostSpec.diskTb * (1 - config.reserveRatio));
   const densityFloor = Math.max(...keys.map((key) => Math.ceil(config.componentDemands[key].instances / config.componentSpecs[key].maxInstances)));
+  const affinityFloor = Math.max(...keys.map((key) => Math.max(
+    config.componentDemands[key].antiAffinityFloor || 0,
+    config.componentDemands[key].tenantHostFloor || 0,
+    config.componentDemands[key].isolationFloor || 0
+  )));
   const byCpu = Math.ceil(demand.cpuCores / usableCores);
   const byMemory = Math.ceil(demand.memoryGb / usableMemoryGb);
   const byDisk = demand.diskTb ? Math.ceil(demand.diskTb / usableDiskTb) : 0;
-  return Math.max(densityFloor, byCpu, byMemory, byDisk);
+  return Math.max(densityFloor, affinityFloor, byCpu, byMemory, byDisk);
 }
 
 function resolveBusinessComponentLayout(requested, requestedGtmAffinity, environment, specs, serverConfigMode) {
@@ -1010,19 +1231,61 @@ function getEligibleServers(servers, componentKey, azIndex) {
   return local.length ? local : eligible;
 }
 
+function countTenantDnRoles(server, tenantName) {
+  return server.roles.filter((role) => role.startsWith(`${tenantName}-DN-G`)).length;
+}
+
+function hasDnGroupRole(server, tenantName, group) {
+  return server.roles.some((role) => role.startsWith(`${tenantName}-DN-G${group}-`));
+}
+
+function parseCnTenant(role) {
+  const match = role.match(/^(.*)-CN\d+$/);
+  return match ? match[1] : null;
+}
+
+function getServerCnTenants(server) {
+  return [...new Set(server.roles.map(parseCnTenant).filter(Boolean))];
+}
+
 function placeTenantCnRolesByPool(servers, config) {
   config.tenantPlans.forEach((tenant) => {
     const totalTenantCn = tenant.cnPerAz * config.azCount;
     for (let index = 0; index < totalTenantCn; index += 1) {
       const azIndex = index % config.azCount;
-      const candidates = getEligibleServers(servers, "cn", azIndex)
-        .sort((a, b) => a.cnCount - b.cnCount || a.roles.length - b.roles.length);
-      const target = candidates.find((server) => server.cnCount < config.maxCnPerServer) || candidates[0];
+      const candidates = getEligibleServers(servers, "cn", azIndex);
+      const comparePlacement = (a, b) => {
+        const aTenants = getServerCnTenants(a);
+        const bTenants = getServerCnTenants(b);
+        if (config.cnTenantPlacement === "shared") {
+          const crossTenantDelta = Number(bTenants.some((name) => name !== tenant.name))
+            - Number(aTenants.some((name) => name !== tenant.name));
+          return crossTenantDelta || a.cnCount - b.cnCount || a.roles.length - b.roles.length;
+        }
+        const sameTenantDelta = Number(bTenants.includes(tenant.name)) - Number(aTenants.includes(tenant.name));
+        return sameTenantDelta || b.cnCount - a.cnCount || a.roles.length - b.roles.length;
+      };
+      const capacityCandidates = candidates
+        .filter((server) => server.cnCount < config.maxCnPerServer);
+      const policyCandidates = capacityCandidates
+        .filter((server) => config.cnTenantPlacement === "shared"
+          || getServerCnTenants(server).every((name) => name === tenant.name))
+        .sort(comparePlacement);
+      const target = policyCandidates[0]
+        || capacityCandidates.sort(comparePlacement)[0]
+        || candidates.sort(comparePlacement)[0];
       if (!target) continue;
       target.roles.push(`${tenant.name}-CN${index + 1}`);
       target.cnCount += 1;
     }
   });
+}
+
+function getCnTenantIsolationViolations(serverPlan, cnTenantPlacement) {
+  if (cnTenantPlacement !== "isolated") return [];
+  return serverPlan
+    .map((server) => ({ serverId: server.id, tenants: getServerCnTenants(server) }))
+    .filter((item) => item.tenants.length > 1);
 }
 
 function placeDnRolesByPool(servers, config) {
@@ -1031,9 +1294,33 @@ function placeDnRolesByPool(servers, config) {
       for (let replica = 1; replica <= tenant.replicasPerShard; replica += 1) {
         const role = replica === 1 ? "Master" : `Slave${replica - 1}`;
         const azIndex = (group + replica - 2) % config.azCount;
-        const candidates = getEligibleServers(servers, "dn", azIndex)
-          .sort((a, b) => a.dnCount - b.dnCount || a.roles.length - b.roles.length);
-        const target = candidates.find((server) => server.dnCount < config.maxDnPerServer) || candidates[0];
+        const candidates = servers.filter((server) => server.componentKeys.includes("dn"));
+        const withoutSameGroup = candidates.filter((server) => !hasDnGroupRole(server, tenant.name, group));
+        const comparePlacement = (a, b) => {
+          const azDelta = Number(b.azIndex === azIndex) - Number(a.azIndex === azIndex);
+          if (azDelta) return azDelta;
+          const aTenantDn = countTenantDnRoles(a, tenant.name);
+          const bTenantDn = countTenantDnRoles(b, tenant.name);
+          if (config.allowShardColocation) {
+            const tenantPresenceDelta = Number(bTenantDn > 0) - Number(aTenantDn > 0);
+            if (tenantPresenceDelta) return tenantPresenceDelta;
+            if (aTenantDn !== bTenantDn) return bTenantDn - aTenantDn;
+          }
+          return a.dnCount - b.dnCount || a.roles.length - b.roles.length;
+        };
+        const eligible = withoutSameGroup
+          .filter((server) =>
+            server.dnCount < config.maxDnPerServer &&
+            countTenantDnRoles(server, tenant.name) < config.maxTenantDnPerServer
+          )
+          .sort(comparePlacement);
+        const capacityFallback = withoutSameGroup
+          .filter((server) => server.dnCount < config.maxDnPerServer)
+          .sort(comparePlacement);
+        const target = eligible[0]
+          || capacityFallback[0]
+          || withoutSameGroup.sort(comparePlacement)[0]
+          || candidates.sort(comparePlacement)[0];
         if (!target) continue;
         target.roles.push(`${tenant.name}-DN-G${group}-${role}`);
         target.dnCount += 1;
@@ -1042,14 +1329,88 @@ function placeDnRolesByPool(servers, config) {
   });
 }
 
+function getDnReplicaHostViolations(serverPlan) {
+  const groupHosts = new Map();
+  serverPlan.forEach((server) => {
+    server.roles.forEach((role) => {
+      const match = role.match(/^(.*)-DN-G(\d+)-/);
+      if (!match) return;
+      const key = `${match[1]}-G${match[2]}`;
+      if (!groupHosts.has(key)) groupHosts.set(key, []);
+      groupHosts.get(key).push(server.id);
+    });
+  });
+  return [...groupHosts.entries()]
+    .filter(([, hosts]) => new Set(hosts).size !== hosts.length)
+    .map(([group, hosts]) => ({ group, hosts }));
+}
+
 function placeGtmRolesByPool(servers, config) {
-  for (let index = 0; index < config.gtmNodes; index += 1) {
-    const azIndex = index % config.azCount;
-    const candidates = getEligibleServers(servers, "gtm", azIndex)
-      .sort((a, b) => countMatchingRole(a, isGtmRole) - countMatchingRole(b, isGtmRole) || a.roles.length - b.roles.length);
-    const target = candidates.find((server) => countMatchingRole(server, isGtmRole) < 2) || candidates[0];
-    if (target) target.roles.push(getNextGtmRoleLabel(config, index));
+  getGtmRolePlacements(config).forEach((placement) => {
+    const candidates = servers
+      .filter((server) => server.componentKeys.includes("gtm"))
+      .sort((a, b) => {
+        const azDelta = Number(b.azIndex === placement.azIndex) - Number(a.azIndex === placement.azIndex);
+        return azDelta || countMatchingRole(a, isGtmRole) - countMatchingRole(b, isGtmRole) || a.roles.length - b.roles.length;
+      });
+    const withoutSameGroup = candidates.filter((server) =>
+      !server.roles.some((role) => getGtmRoleGroupKey(role) === placement.groupKey)
+    );
+    const target = withoutSameGroup.find((server) => countMatchingRole(server, isGtmRole) < 2)
+      || withoutSameGroup[0]
+      || candidates[0];
+    if (target) target.roles.push(placement.label);
+  });
+}
+
+function getGtmRolePlacements(config) {
+  if (!config.gtmNodes) return [];
+  const binding = config.gtmBinding || { kind: "shared", groupCount: 1 };
+  const groupCount = Math.max(1, binding.groupCount || 1);
+  const distributedTenants = (config.tenantPlans || []).filter((tenant) => tenant.isDistributed);
+  const baseCount = Math.floor(config.gtmNodes / groupCount);
+  const remainder = config.gtmNodes % groupCount;
+  const placements = [];
+  for (let groupIndex = 0; groupIndex < groupCount; groupIndex += 1) {
+    const replicas = baseCount + (groupIndex < remainder ? 1 : 0);
+    const tenant = distributedTenants[groupIndex];
+    const groupKey = binding.kind === "dedicated" && tenant ? `${tenant.name}-GTM` : "GTM-SYS";
+    for (let replica = 1; replica <= replicas; replica += 1) {
+      placements.push({
+        groupKey,
+        label: groupKey === "GTM-SYS" ? `GTM-SYS${replica}` : `${tenant.name}-GTM${replica}`,
+        azIndex: (replica - 1) % config.azCount
+      });
+    }
   }
+  return placements;
+}
+
+function getGtmRoleGroupKey(role) {
+  if (/^GTM-SYS\d+$/.test(role)) return "GTM-SYS";
+  const tenantMatch = role.match(/^(.*)-GTM\d+$/);
+  return tenantMatch ? `${tenantMatch[1]}-GTM` : null;
+}
+
+function getGtmReplicaHostViolations(serverPlan) {
+  const groupHosts = new Map();
+  serverPlan.forEach((server) => {
+    server.roles.forEach((role) => {
+      const groupKey = getGtmRoleGroupKey(role);
+      if (!groupKey) return;
+      if (!groupHosts.has(groupKey)) groupHosts.set(groupKey, []);
+      groupHosts.get(groupKey).push(server.id);
+    });
+  });
+  return [...groupHosts.entries()]
+    .filter(([, hosts]) => new Set(hosts).size !== hosts.length)
+    .map(([group, hosts]) => ({ group, hosts }));
+}
+
+function getManagementHostViolations(serverPlan) {
+  return serverPlan
+    .filter((server) => server.roles.filter((role) => role === "管理节点").length > 1)
+    .map((server) => server.id);
 }
 
 function placeManagementRolesByPool(servers, config) {
@@ -1330,9 +1691,8 @@ function getGtmBinding(shape, distributedTenants, mode) {
   };
 }
 
-function getBusinessGtmNodes(shape, mode, binding, environment) {
-  if (shape !== "distributed" || binding.kind === "none") return 0;
-  const perGroup = environment === "poc"
+function getRecommendedBusinessGtmReplicas(environment, mode) {
+  return environment === "poc"
     ? (mode === "local1az" ? 1 : 2)
     : mode === "local1az"
       ? 3
@@ -1341,7 +1701,11 @@ function getBusinessGtmNodes(shape, mode, binding, environment) {
         : mode === "twoSiteThreeDc"
           ? 5
           : 5;
-  return Math.max(perGroup, binding.groupCount * perGroup);
+}
+
+function getBusinessGtmNodes(shape, mode, binding, environment) {
+  if (shape !== "distributed" || binding.kind === "none") return 0;
+  return binding.groupCount * getRecommendedBusinessGtmReplicas(environment, mode);
 }
 
 function buildBusinessTenantPlans(data) {
@@ -1604,6 +1968,7 @@ function render(options = {}) {
   renderSummary(data);
   renderMetrics(data);
   renderNodePlan(data);
+  renderReductionPlan(data);
   renderRisks(data);
   renderHaGuide(data);
   if (isReverse) {
@@ -1804,6 +2169,13 @@ function syncParameterPanels() {
   $("reversePlanBlock").classList.toggle("hidden", !isReverse);
   $("businessServerBlock").classList.toggle("hidden", isReverse);
   syncBusinessServerConfigPanel();
+  syncResourceReductionControls();
+}
+
+function syncResourceReductionControls() {
+  ["business", "reverse"].forEach((prefix) => {
+    $(`${prefix}MaxTenantDnPerServer`).disabled = !$(`${prefix}AllowShardColocation`).checked;
+  });
 }
 
 function syncBusinessServerConfigPanel() {
@@ -1874,15 +2246,17 @@ function renderNodePlan(data) {
     ["设计模式", `${environmentLabels[data.environment]} · ${goalLabels[data.goal]} · ${data.componentLayoutLabel}`],
     ["服务器资源", `${data.serverCount} 台 ${getServerTypeLabel(data.serverType)}，每台 ${data.cpuCores}C/${data.memoryGb}GB/${data.diskTb}TB，预留 ${round(data.reserveRatio * 100)}%。`],
     ["CN 计算节点", `每 AZ ${data.cnPerAz} 个，总计 ${data.totalCn} 个；单机最多 ${data.maxCnPerServer} 个 CN。`],
+    ["CN 租户部署", `${data.resourceReduction.cnTenantPlacementLabel}；${data.resourceReduction.configuredCnTenantPlacement === "auto" ? "由环境自动选择" : "用户手工指定"}。`],
     ["DN 数据节点", `${data.shardCount} 个分片 × ${data.replicasPerShard} 副本 = ${data.dnInstances} 个 DN 实例；单机最多 ${data.maxDnPerServer} 个 DN。`],
-    ["GTM", `${data.gtmBinding.label}；规划 ${data.gtmNodes} 个 GTM 实例。`],
+    ["GTM", `${data.gtmBinding.label}；${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 个 GTM 实例${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}。`],
     ["GTM 部署亲和", `${data.gtmAffinityLabel}；${data.componentSizing.note}`],
     ["管理节点", `${data.managementNodes} 个；当前环境建议不少于 ${data.recommendedManagementNodes} 个。${data.environment === "production" ? "生产按 HA 管理面规划。" : "POC 可简化，建议保留恢复验证能力。"}`],
     ["资源结论", `${data.resourceState}：当前组合预计需要 ${data.requiredServerCount} 台，当前 ${data.serverCount} 台，可用口径约 ${data.usableServerCount} 台。`]
   ] : [
     ["CN 计算节点", `每 AZ ${data.cnPerAz} 个，总计约 ${data.totalCn} 个。交易、批量、查询建议拆入口。`],
+    ["CN 租户部署", `${data.resourceReduction.cnTenantPlacementLabel}；${data.resourceReduction.configuredCnTenantPlacement === "auto" ? "由环境自动选择" : "用户手工指定"}。`],
     ["DN 数据节点", `租户分片汇总 ${data.shardCount} 个 Group，副本实例合计 ${data.dnInstances} 个 DN；${data.tenantPlans.map((tenant) => `${tenant.name} 为 1 主 + ${Math.max(0, tenant.replicasPerShard - 1)} 从`).join("，")}。`],
-    ["GTM", data.shape === "distributed" ? `${data.gtmBinding.label}；规划 ${data.gtmNodes} 个 GTM 实例。` : "集中式单分片事务通常不把 GTM 作为主路径。"],
+    ["GTM", data.shape === "distributed" ? `${data.gtmBinding.label}；${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 个 GTM 实例${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}。` : "集中式单分片事务通常不把 GTM 作为主路径。"],
     ["GTM 部署亲和", `${data.serverSizing.gtmAffinityLabel}；${data.serverSizing.componentLayoutNote}`],
     ["管理节点", `${data.managementNodes} 个；当前环境建议不少于 ${data.recommendedManagementNodes} 个，管理网络与业务网络隔离。`],
     ["租户", `${data.businessTenants} 个租户实例，其中 ${data.distributedTenants} 个分布式租户；每个租户包含自己的 CN、DN 分片和副本资源。`],
@@ -1943,6 +2317,14 @@ function renderRisks(data) {
     if (data.managementNodes < data.recommendedManagementNodes) {
       risks.push(["risk-high", `管理节点仅 ${data.managementNodes} 个，低于当前环境建议的 ${data.recommendedManagementNodes} 个；请补足故障域覆盖或取得厂商方案确认。`]);
     }
+    if (data.cnTenantIsolationViolations.length) {
+      risks.push(["risk-high", `CN 租户隔离未满足：${data.cnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("、")} 同时承载多个租户 CN；请增加 CN 服务器或改为跨租户混部策略。`]);
+    } else if (data.environment === "production" && data.resourceReduction.allowCnTenantColocation) {
+      risks.push(["risk-mid", "生产环境选择了跨租户 CN 混部，必须使用容器/cgroup 等机制设置 CPU、内存资源边界，并验证单机故障时多个租户的接管余量。"]);
+    }
+    if (data.configuredGtmReplicasPerGroup > 0 && data.gtmReplicasPerGroup < data.recommendedGtmReplicasPerGroup) {
+      risks.push(["risk-high", `每个 GTM Group 手工设置 ${data.gtmReplicasPerGroup} 副本，低于当前环境推荐的 ${data.recommendedGtmReplicasPerGroup} 副本；请增加副本或恢复为 0 自动推荐。`]);
+    }
     if (data.gtmAffinity === "tenantPool" && data.environment === "production") {
       risks.push(["risk-high", "GTM 随 CN/DN/管理组件全混布会扩大事务控制面的故障影响，生产核心系统不建议采用。"]);
     }
@@ -1951,6 +2333,22 @@ function renderRisks(data) {
     }
     if (data.serverPlan.some((server) => server.diskLoad >= 90)) {
       risks.push(["risk-mid", "部分服务器 DN 密度较高，磁盘或 IO 可能成为瓶颈，建议降低单机 DN 上限或增加服务器。"]);
+    }
+    if (data.dnReplicaHostViolations.length) {
+      risks.push(["risk-high", `副本反亲和不满足：${data.dnReplicaHostViolations.map((item) => item.group).join("、")} 存在同一 Group 多副本同机，请增加服务器或降低其他组件占用。`]);
+    } else {
+      risks.push(["risk-ok", "已校验同一 Group 的 Master/Slave 均分布在不同物理服务器。"]);
+    }
+    if (data.gtmReplicaHostViolations.length) {
+      risks.push(["risk-high", `GTM 反亲和不满足：${data.gtmReplicaHostViolations.map((item) => item.group).join("、")} 存在同组实例同机，请增加 GTM 可用主机。`]);
+    } else {
+      risks.push(["risk-ok", "已校验同一 GTM Group 的实例均跨物理服务器部署。"]);
+    }
+    if (data.environment === "production" && data.resourceReduction.allowShardColocation) {
+      risks.push(["risk-mid", `同租户不同 Group 允许共宿，单机上限 ${data.resourceReduction.maxTenantDnPerServer} 个 DN；生产需设置 CPU、内存、IOPS 和磁盘水位及故障接管余量。`]);
+    }
+    if (data.resourceReduction.productionMaximumRedline) {
+      risks.push(["risk-high", "生产环境触发全组件混部红线，请取消该勾选项后重新计算。"]);
     }
     risks.push(["risk-ok", data.environment === "poc" ? "POC 方案用于功能、兼容性和性能趋势验证，不建议直接照搬生产。" : "生产方案优先副本隔离、管理面 HA、GTM 主备和资源预留。"]);
     $("riskList").innerHTML = risks
@@ -2003,11 +2401,38 @@ function renderRisks(data) {
   if (data.managementNodes < data.recommendedManagementNodes) {
     risks.push(["risk-high", `管理节点指定为 ${data.managementNodes} 个，低于当前环境建议的 ${data.recommendedManagementNodes} 个；服务器数仍按输入计算，但高可用结论不通过。`]);
   }
+  if (data.serverSizing.cnTenantIsolationViolations.length) {
+    risks.push(["risk-high", `CN 租户隔离未满足：${data.serverSizing.cnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("、")} 同时承载多个租户 CN；请增加 CN 服务器或改为跨租户混部策略。`]);
+  } else if (data.environment === "production" && data.resourceReduction.allowCnTenantColocation) {
+    risks.push(["risk-mid", "生产环境选择了跨租户 CN 混部。CN 仍归属各自租户，但共享物理故障域；需设置资源配额并完成多租户峰值叠加与故障接管压测。"]);
+  }
+  if (data.shape === "distributed" && data.configuredGtmReplicasPerGroup > 0 && data.gtmReplicasPerGroup < data.recommendedGtmReplicasPerGroup) {
+    risks.push(["risk-high", `每个 GTM Group 手工设置 ${data.gtmReplicasPerGroup} 副本，低于当前环境推荐的 ${data.recommendedGtmReplicasPerGroup} 副本；请增加副本或恢复为 0 自动推荐。`]);
+  }
   if (data.serverSizing.gtmAffinity === "tenantPool" && data.environment === "production") {
     risks.push(["risk-high", "GTM 与 CN/DN/管理节点全混布只适合 POC 或非核心验证，不应作为核心生产部署基线。"]);
   }
   if (data.serverSizing.dnServersByCapacity > data.serverSizing.dnServersByDensity) {
     risks.push(["risk-mid", `DN 台数由容量决定：副本落盘约 ${round(data.serverSizing.storedDataTb)}TB，高于实例密度口径。`]);
+  }
+  if (data.serverSizing.dnReplicaHostViolations.length) {
+    risks.push(["risk-high", `副本反亲和不满足：${data.serverSizing.dnReplicaHostViolations.map((item) => item.group).join("、")} 存在同一 Group 多副本同机，当前方案不可用于生产。`]);
+  } else {
+    risks.push(["risk-ok", "已校验同一 Group 的 Master/Slave 均跨物理服务器部署。"]);
+  }
+  if (data.serverSizing.gtmReplicaHostViolations.length) {
+    risks.push(["risk-high", `GTM 反亲和不满足：${data.serverSizing.gtmReplicaHostViolations.map((item) => item.group).join("、")} 存在同组实例同机，当前方案不可用于生产。`]);
+  } else {
+    risks.push(["risk-ok", "已校验同一 GTM Group 的实例均跨物理服务器部署。"]);
+  }
+  if (data.environment === "production" && data.resourceReduction.allowShardColocation) {
+    risks.push(["risk-mid", `同租户不同 Group 允许共宿，单机上限 ${data.resourceReduction.maxTenantDnPerServer} 个 DN；上线前需完成峰值叠加和单机故障接管压测。`]);
+  }
+  if (data.resourceReduction.productionMaximumRedline) {
+    risks.push(["risk-high", "生产环境触发全组件混部红线，请取消该勾选项并改用 CN+DN、GTM+管理分组混部或独立部署。"]);
+  }
+  if (data.resourceReduction.densityCapped) {
+    risks.push(["risk-high", `单机同租户 DN 上限 ${data.resourceReduction.configuredTenantLimit} 超过该 DN 机型单机总实例上限 ${data.resourceReduction.maxDnPerServer}，请修改后重新计算。`]);
   }
   if (data.environment === "production" && data.serverSizing.dedicatedServers > data.serverSizing.mixedServers) {
     risks.push(["risk-ok", "生产环境按分层隔离口径推荐服务器数，POC 可参考混布口径节省资源。"]);
@@ -2078,6 +2503,7 @@ function renderFormula(data) {
     `单 CN 安全事务能力 = ${data.singleCoreTps} × ${data.cpuCores} × ${data.cpuLimit} = ${round(data.cnSingleNodeTps)} TPS`,
     `基础 CN = ROUNDUP(${round(data.businessTxnTps)} / ${round(data.cnSingleNodeTps)}) × ${round(data.growthPower)} = ${round(data.cnRaw)}`,
     `最终 CN = ${data.cnPerAz} / AZ`,
+    `CN 租户部署 = ${data.resourceReduction.cnTenantPlacementLabel}${data.resourceReduction.configuredCnTenantPlacement === "auto" ? "（环境自动）" : "（手工指定）"}`,
     "",
     "DN 分片规划（按租户分别计算后汇总）：",
     `规划总数据量 = ${data.dataTb}TB × POWER(${data.growthFactor}, ${data.years}) = ${round(data.futureDataTb)}TB`,
@@ -2087,6 +2513,8 @@ function renderFormula(data) {
     `说明：DN TPS 水位是指定服务器规格和真实业务模型下的单主分片压测值，不与 CN 单核 TPS K 直接联乘。`,
     `DN 实例 = 租户内分片 × 各租户副本数汇总 = ${data.dnInstances}`,
     `副本角色 = ${data.tenantPlans.map((tenant) => `${tenant.name} ${tenant.replicasPerShard}副本（1主+${Math.max(0, tenant.replicasPerShard - 1)}从）`).join("；")}`,
+    `GTM 实例 = ${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes}${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}；当前环境推荐每 Group ${data.recommendedGtmReplicasPerGroup} 副本`,
+    `管理节点 = ${data.managementNodes} 个；当前环境建议不少于 ${data.recommendedManagementNodes} 个`,
     "",
     "服务器配置与个数推算：",
     `规格来源 = ${data.serverSizing.serverSpec}；统一预留 ${round(data.serverSizing.reserveRatio * 100)}% 后，按各组件机型分别计算`,
@@ -2095,8 +2523,9 @@ function renderFormula(data) {
     ...componentServerDefinitions.map(({ key, label }) => {
       const spec = data.serverSizing.componentSpecs[key];
       const requirement = data.serverSizing.requirements[key];
-      return `${label} = ${spec.model} ${spec.sockets}路/${spec.cores}总物理核/${spec.memoryGb}GB/数据盘${spec.dataDiskTb}TB×${spec.dataDiskCount}，Max(实例 ${requirement.byInstances}, CPU ${requirement.byCpu}, 内存 ${requirement.byMemory}, 数据盘 ${requirement.byDisk}) = ${requirement.servers} 台`;
+      return `${label} = ${spec.model} ${spec.sockets}路/${spec.cores}总物理核/${spec.memoryGb}GB/数据盘${spec.dataDiskTb}TB×${spec.dataDiskCount}，Max(实例 ${requirement.byInstances}, CPU ${requirement.byCpu}, 内存 ${requirement.byMemory}, 数据盘 ${requirement.byDisk}, 反亲和/租户密度 ${requirement.byAffinity}) = ${requirement.servers} 台`;
     }),
+    `严格隔离基线（组件分层、单机 1 DN）= ${data.serverSizing.strictBaselineServers} 台；当前装箱估算缩减 ${data.serverSizing.savedServers} 台（${round(data.serverSizing.savingRatio * 100)}%）`,
     `独立部署 = ${data.serverSizing.dedicatedServers} 台；GTM+管理合设 = ${data.serverSizing.gtmMgrMixedServers} 台；CN+DN混合 = ${data.serverSizing.cnDnMixedServers} 台；全混布 = ${data.serverSizing.allMixedServers} 台`,
     `双主机组混部 = CN+DN、GTM+管理 ${data.serverSizing.cnDnGtmMgrMixedServers} 台；GTM 亲和结果 = ${data.serverSizing.gtmAffinityLabel}`,
     `当前组件组合 = ${data.serverSizing.componentLayoutLabel}；${getDeploymentArchitectureText(data.serverSizing)}；最终推荐 = ${data.serverSizing.recommendedServers} 台`
@@ -2110,11 +2539,13 @@ function renderReverseFormula(data) {
     `环境类型 = ${environmentLabels[data.environment]}，设计目标 = ${goalLabels[data.goal]}`,
     `可用服务器口径 = FLOOR(${data.serverCount} × (1 - ${data.reserveRatio})) = ${data.usableServerCount} 台`,
     `CN 实例 = ${data.cnPerAz}/AZ × ${data.azCount} AZ = ${data.totalCn}`,
+    `CN 租户部署 = ${data.resourceReduction.cnTenantPlacementLabel}${data.resourceReduction.configuredCnTenantPlacement === "auto" ? "（环境自动）" : "（手工指定）"}`,
     `DN 实例 = ${data.shardCount} 分片 × ${data.replicasPerShard} 副本 = ${data.dnInstances}`,
-    `GTM 实例 = ${data.gtmNodes}，管理节点 = ${data.managementNodes}`,
-    `独立部署最少服务器 = CEIL(${data.totalCn}/${data.maxCnPerServer}) + CEIL(${data.dnInstances}/${data.maxDnPerServer}) + CEIL(${data.gtmNodes}/2) + ${data.managementNodes} = ${data.requiredDedicatedServers}`,
+    `GTM 实例 = ${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes}${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}，管理节点 = ${data.managementNodes}`,
+    `独立部署最少服务器 = CN ${data.componentSizing.cnServers} + DN ${data.componentSizing.dnServers} + GTM ${data.componentSizing.gtmServers} + 管理 ${data.componentSizing.managementServers} = ${data.requiredDedicatedServers} 台（已纳入资源水位及 DN/GTM 副本反亲和）`,
     `组件组合对比 = 独立 ${data.componentSizing.dedicatedServers} 台 / GTM+管理 ${data.componentSizing.gtmMgrMixedServers} 台 / CN+DN ${data.componentSizing.cnDnMixedServers} 台 / 双主机组 ${data.componentSizing.cnDnGtmMgrMixedServers} 台 / 全混布 ${data.componentSizing.allMixedServers} 台`,
-    `GTM 部署亲和 = ${data.gtmAffinityLabel}；管理节点建议值 = ${data.recommendedManagementNodes}，当前输入 = ${data.managementNodes}`,
+    `严格隔离基线（组件分层、单机 1 DN）= ${data.componentSizing.strictBaselineServers} 台；当前组合估算缩减 ${data.componentSizing.savedServers} 台（${round(data.componentSizing.savingRatio * 100)}%）`,
+    `GTM 部署亲和 = ${data.gtmAffinityLabel}；每 Group 副本推荐值 = ${data.recommendedGtmReplicasPerGroup}，当前采用 = ${data.gtmReplicasPerGroup}；管理节点建议值 = ${data.recommendedManagementNodes}，当前输入 = ${data.managementNodes}`,
     `当前组件组合 = ${data.componentLayoutLabel}，最少服务器 = ${data.requiredServerCount}`,
     `资源状态 = ${data.resourceState}`,
     "",
@@ -2130,7 +2561,11 @@ function renderReversePlan(data) {
     ["推荐类型", `${environmentLabels[data.environment]} · ${goalLabels[data.goal]}`],
     ["资源状态", `${data.resourceState}，${conclusion}`],
     ["组件组合", `${data.componentLayoutLabel} · ${data.componentSizing.note}`],
+    ["资源缩减", `${data.resourceReduction.presetLabel} · 基线 ${data.componentSizing.strictBaselineServers} 台，估算缩减 ${data.componentSizing.savedServers} 台`],
     ["GTM 部署亲和", data.gtmAffinityLabel],
+    ["CN 租户部署", data.resourceReduction.cnTenantPlacementLabel],
+    ["GTM Group 副本", `${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 实例（推荐每组 ${data.recommendedGtmReplicasPerGroup}）`],
+    ["管理节点", `${data.managementNodes} 个（推荐不少于 ${data.recommendedManagementNodes} 个）`],
     ["服务器使用", `${data.serverPlan.filter((server) => server.roles.length > 0).length}/${data.serverCount} 台有部署组件`],
     ["组件总量", `${data.totalCn} CN / ${data.dnInstances} DN / ${data.gtmNodes} GTM / ${data.managementNodes} 管理节点`],
     ["副本与分片", `${data.shardCount} Group × ${data.replicasPerShard} 副本`],
@@ -2146,16 +2581,119 @@ function renderReversePlan(data) {
   `;
 }
 
+function renderReductionPlan(data) {
+  const reduction = data.resourceReduction;
+  const sizing = data.reverse ? data.componentSizing : data.serverSizing;
+  const selectedServers = data.reverse ? data.requiredServerCount : sizing.recommendedServers;
+  const redlines = getResourceReductionRedlines(data);
+  const statusClass = redlines.length ? "risk-high" : "risk-ok";
+  const statusText = redlines.length
+    ? `不通过：触发 ${redlines.length} 项红线，请修改勾选项或补充资源后重新计算`
+      : "通过：当前多项缩减组合未触达硬红线";
+  const selectedMeasures = getSelectedReductionMeasures(reduction);
+  const colocation = getShardColocationState(data);
+  const cnColocation = getCnTenantColocationState(data);
+  const advice = [
+    reduction.allowCnTenantColocation
+      ? cnColocation.serverCount
+        ? `跨租户 CN 共宿已实际命中 ${cnColocation.serverCount} 台服务器：${cnColocation.hits.slice(0, 6).map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("；")}。`
+        : "跨租户 CN 混部已启用，但当前租户数量、CN 密度或服务器数量未产生实际共宿。"
+      : "CN 按租户独立服务器落位，降低单机故障同时影响多个租户的范围。",
+    reduction.allowShardColocation
+      ? colocation.serverCount
+        ? `不同 Group 共宿已实际命中 ${colocation.serverCount} 台服务器：${colocation.hits.slice(0, 6).map((item) => `${item.serverId} ${item.tenant}[${item.groups.map((group) => `G${group}`).join("+")}]`).join("；")}。`
+        : `不同 Group 共宿策略已启用，但当前参数未产生实际共宿；单机同租户 DN 上限为 ${reduction.maxTenantDnPerServer}。`
+      : "不同 Group 也按单机单 DN 隔离，服务器节省较少但故障域最清晰。",
+    ["cnDnMixed", "cnDnGtmMgrMixed"].includes(sizing.effectiveLayout)
+      ? "CN 与 DN 共享主机：适合 POC、非核心或已完成峰值叠加及故障切换压测的资源池。"
+      : "CN 与 DN 当前保持主机隔离，计算和存储资源边界更清晰。",
+    sizing.gtmAffinity === "management"
+      ? "GTM 与管理节点合设：可缩减管理面服务器，但两者仍应跨主机、跨故障域部署。"
+      : sizing.gtmAffinity === "tenantPool"
+        ? "GTM 随租户组件全混布：仅限 POC，不作为核心生产基线。"
+        : "GTM 独立部署：事务控制面隔离性最高。",
+    "可继续缩减的前提是单机 CPU、内存、数据盘、IOPS 和网络均低于规划水位；页面结果是初步装箱估算，最终以版本兼容清单、实测和厂商评审为准。"
+  ];
+
+  $("reductionPlan").innerHTML = `
+    <div class="reduction-summary">
+      <div class="reduction-stat"><span>已选缩减措施</span><strong>${selectedMeasures.join(" + ") || "独立部署"}</strong></div>
+      <div class="reduction-stat"><span>严格隔离基线</span><strong>${sizing.strictBaselineServers} 台</strong></div>
+      <div class="reduction-stat"><span>当前规划口径</span><strong>${selectedServers} 台</strong></div>
+      <div class="reduction-stat"><span>估算缩减</span><strong>${sizing.savedServers} 台 / ${round(sizing.savingRatio * 100)}%</strong></div>
+    </div>
+    <p class="reduction-status ${statusClass}">${statusText}</p>
+    ${redlines.length ? `<div class="redline-output"><strong>必须修改</strong><ul>${redlines.map((item) => `<li>${item}</li>`).join("")}</ul></div>` : ""}
+    <ul class="reduction-advice">${advice.map((item) => `<li>${item}</li>`).join("")}</ul>
+  `;
+}
+
+function getSelectedReductionMeasures(reduction) {
+  const measures = [];
+  if (reduction.allowCnTenantColocation) measures.push("跨租户 CN 共宿");
+  if (reduction.allowShardColocation) measures.push("不同 Group 共宿");
+  if (reduction.allowCnDnMixed) measures.push("CN/DN 混部");
+  if (reduction.allowGtmManagementMixed) measures.push("GTM/管理混部");
+  if (reduction.allowAllMixed) measures.push("全组件混部");
+  return measures;
+}
+
+function getResourceReductionRedlines(data) {
+  const redlines = [];
+  const sizing = data.reverse ? data : data.serverSizing;
+  const dnViolations = data.reverse ? data.dnReplicaHostViolations : data.serverSizing.dnReplicaHostViolations;
+  const gtmViolations = data.reverse ? data.gtmReplicaHostViolations : data.serverSizing.gtmReplicaHostViolations;
+  const managementViolations = data.reverse ? data.managementHostViolations : data.serverSizing.managementHostViolations;
+  const cnTenantIsolationViolations = data.reverse ? data.cnTenantIsolationViolations : data.serverSizing.cnTenantIsolationViolations;
+  if (cnTenantIsolationViolations.length) {
+    redlines.push(`CN 租户隔离冲突：${cnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("、")}；请增加 CN 服务器或选择跨租户 CN 混部。`);
+  }
+  if (dnViolations.length) {
+    redlines.push(`DN 副本同机：${dnViolations.map((item) => item.group).join("、")}；请增加 DN 可用服务器或降低共宿密度。`);
+  }
+  if (gtmViolations.length) {
+    redlines.push(`GTM 副本同机：${gtmViolations.map((item) => item.group).join("、")}；请增加 GTM/管理主机或改为 GTM 独立部署。`);
+  }
+  if (managementViolations.length) {
+    redlines.push(`管理节点同机：${managementViolations.join("、")} 承载多个管理节点副本；请增加管理主机并保持一机一副本。`);
+  }
+  if (data.resourceReduction.productionMaximumRedline) {
+    redlines.push("生产环境禁止 CN、DN、GTM、管理节点全混布；请取消“全组件混部”，改用分组混部或独立部署。");
+  }
+  if (data.resourceReduction.densityCapped) {
+    redlines.push(`单机同租户 DN 上限 ${data.resourceReduction.configuredTenantLimit} 超过该 DN 机型的单机总实例上限 ${data.resourceReduction.maxDnPerServer}；请下调输入或修改服务器规格。`);
+  }
+  if (data.managementNodes < data.recommendedManagementNodes) {
+    redlines.push(`管理节点 ${data.managementNodes} 个低于当前环境建议的 ${data.recommendedManagementNodes} 个；请增加管理节点。`);
+  }
+  if (data.gtmNodes > 0 && data.configuredGtmReplicasPerGroup > 0 && data.gtmReplicasPerGroup < data.recommendedGtmReplicasPerGroup) {
+    redlines.push(`每个 GTM Group 设置 ${data.gtmReplicasPerGroup} 副本，低于当前环境推荐的 ${data.recommendedGtmReplicasPerGroup} 副本；请增加副本或输入 0 恢复自动推荐。`);
+  }
+  if (data.environment === "production" && data.mode === "local1az") {
+    redlines.push("生产环境仅部署本地单机房，无法覆盖机房级故障；请改为同城双机房或更高容灾模式。");
+  }
+  if (data.reverse && data.resourceState === "不足") {
+    redlines.push(`当前 ${data.serverCount} 台服务器少于组件装箱所需 ${data.requiredServerCount} 台；请增加服务器或降低非高可用资源需求。`);
+  }
+  if (!data.reverse && sizing.serverPlan.filter((server) => server.roles.length).length > sizing.recommendedServers) {
+    redlines.push("物理落位数量超过推荐服务器数，请增加服务器并重新生成拓扑。");
+  }
+  return redlines;
+}
+
 function renderBusinessServerPlan(data) {
   const sizing = data.serverSizing;
   const azNames = getAzNames(data.mode, data.azCount);
   const cards = [
     ["服务器规格来源", `${sizing.serverSpec} · ${sizing.profileLabel}`],
     ["组件组合方式", `${sizing.componentLayoutLabel} · ${sizing.componentLayoutNote}`],
+    ["CN 租户部署", data.resourceReduction.cnTenantPlacementLabel],
     ["GTM 部署亲和", sizing.gtmAffinityLabel],
+    ["GTM Group 副本", `${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 实例（推荐每组 ${data.recommendedGtmReplicasPerGroup}）`],
     ["管理节点规划", `${data.managementNodes} 个（当前环境建议不少于 ${data.recommendedManagementNodes} 个）`],
     ["资源预留后可用", `${sizing.usableSpec}，预留 ${round(sizing.reserveRatio * 100)}%`],
     ["推荐服务器数", `${sizing.recommendedServers} 台 · ${sizing.deploymentStyle}`],
+    ["资源缩减对比", `严格隔离 ${sizing.strictBaselineServers} 台 → 当前 ${sizing.recommendedServers} 台，估算减少 ${sizing.savedServers} 台`],
     ["最终部署组成", getDeploymentArchitectureText(sizing)],
     ["独立部署口径", `${sizing.dedicatedServers} 台：CN ${sizing.cnServers} / DN ${sizing.dnServers} / GTM ${sizing.gtmServers} / 管理 ${sizing.managementServers}`],
     ["推荐混布口径", `GTM+管理 ${sizing.gtmMgrMixedServers} 台 / CN+DN ${sizing.cnDnMixedServers} 台 / 双主机组 ${sizing.cnDnGtmMgrMixedServers} 台 / 全混布 ${sizing.allMixedServers} 台`],
@@ -2177,7 +2715,7 @@ function renderBusinessServerPlan(data) {
             <small>${spec.model} · ${spec.cpuModel} · ${spec.archLabel} · ${spec.osLabel}</small>
             <i>${spec.sockets}路 / ${spec.cores}总物理核 / ${spec.memoryGb}GB · 数据盘 ${spec.dataDiskTb}TB×${spec.dataDiskCount}=${round(spec.diskTb)}TB · 单机≤${spec.maxInstances}实例</i>
             <i>网络 ${spec.network} · 系统盘 ${spec.systemDisk}</i>
-            <em>独立口径 Max(实例 ${requirement.byInstances}, CPU ${requirement.byCpu}, 内存 ${requirement.byMemory}, 磁盘 ${requirement.byDisk})</em>
+            <em>独立口径 Max(实例 ${requirement.byInstances}, CPU ${requirement.byCpu}, 内存 ${requirement.byMemory}, 磁盘 ${requirement.byDisk}, 反亲和/租户密度 ${requirement.byAffinity})</em>
           </article>
         `;
       }).join("")}
@@ -2257,8 +2795,68 @@ function getPlanServers(data) {
   return data.reverse ? data.serverPlan : data.serverSizing.serverPlan;
 }
 
+function parseDnPlacementRole(role) {
+  const match = role.match(/^(.*)-DN-G(\d+)-(Master|Slave\d*|Slave)$/);
+  if (!match) return null;
+  return {
+    tenant: match[1],
+    group: Number(match[2]),
+    role: match[3] === "Master" ? "M" : `S${match[3].replace("Slave", "") || "1"}`
+  };
+}
+
+function getTenantDnPlacements(server, tenantName) {
+  return server.roles
+    .map(parseDnPlacementRole)
+    .filter((item) => item && item.tenant === tenantName)
+    .sort((a, b) => a.group - b.group || a.role.localeCompare(b.role));
+}
+
+function getShardColocationState(data) {
+  const servers = getPlanServers(data);
+  const hits = [];
+  servers.forEach((server) => {
+    data.tenantPlans.forEach((tenant) => {
+      const placements = getTenantDnPlacements(server, tenant.name);
+      const groups = [...new Set(placements.map((item) => item.group))];
+      if (groups.length > 1) hits.push({ serverId: server.id, tenant: tenant.name, groups });
+    });
+  });
+  return {
+    enabled: data.resourceReduction.allowShardColocation,
+    hits,
+    serverCount: new Set(hits.map((item) => item.serverId)).size
+  };
+}
+
+function getCnTenantColocationState(data) {
+  const hits = getPlanServers(data)
+    .map((server) => ({ serverId: server.id, tenants: getServerCnTenants(server) }))
+    .filter((item) => item.tenants.length > 1);
+  return {
+    enabled: data.resourceReduction.allowCnTenantColocation,
+    hits,
+    serverCount: hits.length
+  };
+}
+
+function renderTenantDnPlacement(placements) {
+  if (!placements.length) return "";
+  const uniqueGroups = [...new Set(placements.map((item) => item.group))];
+  return `
+    <div class="ppt-dn-placement ${uniqueGroups.length > 1 ? "is-colocated" : ""}">
+      ${uniqueGroups.length > 1 ? `<span class="group-colocation-badge">同租户多 Group 共宿 · ${uniqueGroups.map((group) => `G${group}`).join(" + ")}</span>` : ""}
+      <div class="ppt-dn-group-list">
+        ${placements.map((item) => `<span class="ppt-dn-group-token">${item.tenant}-DN-G${item.group}-${item.role}</span>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderPptNetworkPlan(data) {
   const servers = getPlanServers(data);
+  const colocation = getShardColocationState(data);
+  const cnColocation = getCnTenantColocationState(data);
   const azNames = getAzNames(data.mode, data.azCount);
   const siteColumns = azNames.map((az, azIndex) => {
     const siteServers = servers.filter((server) => server.az === az);
@@ -2285,6 +2883,24 @@ function renderPptNetworkPlan(data) {
 
   return `
     ${renderTopologyOverview(data)}
+    <div class="topology-policy-state">
+      <div class="topology-policy-row ${cnColocation.enabled && cnColocation.serverCount ? "active" : ""}">
+        <strong>CN 跨租户部署</strong>
+        <span>${cnColocation.enabled
+          ? cnColocation.serverCount
+            ? `混部已生效：${cnColocation.serverCount} 台服务器承载多个租户 CN`
+            : "混部已启用，当前参数未产生跨租户共宿"
+          : "租户独立：每台 CN 服务器仅承载一个租户"}</span>
+      </div>
+      <div class="topology-policy-row ${colocation.enabled && colocation.serverCount ? "active" : ""}">
+        <strong>DN 不同 Group 共宿</strong>
+        <span>${colocation.enabled
+          ? colocation.serverCount
+            ? `已生效：${colocation.serverCount} 台服务器承载同租户多个 Group`
+            : "已启用，但当前参数未产生共宿落位"
+          : "未启用：同租户不同 Group 按服务器隔离"}</span>
+      </div>
+    </div>
     <div class="ppt-network-board" style="--site-count:${data.azCount}">
       <div class="ppt-workload-row">
         <strong>业务系统</strong>
@@ -2296,7 +2912,7 @@ function renderPptNetworkPlan(data) {
       </div>
       <div class="ppt-plan-note">
         <strong>${data.reverse ? data.componentLayoutLabel : data.serverSizing.componentLayoutLabel}</strong>
-        <span>租户边界跨 Server 展开；CN、DN、GTM 均按租户命名，DN 明确 M/S 副本角色。</span>
+        <span>租户边界跨 Server 展开；DN 按 Group 展示 M/S 角色。${colocation.enabled ? `同租户多 Group 共宿实际命中 ${colocation.serverCount} 台。` : "同租户不同 Group 未启用共宿。"}</span>
       </div>
     </div>
   `;
@@ -2306,10 +2922,13 @@ function renderPptLogicalServer(server, data) {
   const tenantGroups = data.tenantPlans.map((tenant, tenantIndex) => {
     const roles = server.roles.filter((role) => role.startsWith(`${tenant.name}-`));
     if (!roles.length) return "";
+    const dnPlacements = getTenantDnPlacements(server, tenant.name);
+    const nonDnRoles = roles.filter((role) => !isDnRole(role));
     return `
       <div class="ppt-tenant-boundary tenant-${tenantIndex % 4}">
         <b>${tenant.name}</b>
-        <div>${roles.slice(0, 8).map(renderPptRolePill).join("")}${roles.length > 8 ? `<span class="role-more">+${roles.length - 8}</span>` : ""}</div>
+        ${nonDnRoles.length ? `<div>${nonDnRoles.slice(0, 6).map(renderPptRolePill).join("")}${nonDnRoles.length > 6 ? `<span class="role-more">+${nonDnRoles.length - 6}</span>` : ""}</div>` : ""}
+        ${renderTenantDnPlacement(dnPlacements)}
       </div>
     `;
   }).join("");
@@ -2377,6 +2996,8 @@ function renderPhysicalServer(server, data) {
       <div class="physical-server-info">
         <div><strong>${server.id}</strong><span>${server.hostGroup || "通用资源池"}</span></div>
         <p>${summarizeServerRoles(server.roles)}</p>
+        ${renderServerCnTenantMap(server.roles)}
+        ${renderServerDnGroupMap(server.roles)}
         <small>${renderServerRoleDetail(server.roles)}</small>
         <em>${specText}</em>
       </div>
@@ -2755,6 +3376,32 @@ function summarizeServerRoles(roles) {
   return parts.join(" / ") || roles.join(" / ");
 }
 
+function renderServerDnGroupMap(roles) {
+  const tenants = new Map();
+  roles.map(parseDnPlacementRole).filter(Boolean).forEach((item) => {
+    if (!tenants.has(item.tenant)) tenants.set(item.tenant, []);
+    tenants.get(item.tenant).push(item);
+  });
+  if (!tenants.size) return "";
+  return `
+    <div class="physical-dn-group-map">
+      ${[...tenants.entries()].map(([tenant, placements]) => {
+        const groups = [...new Set(placements.map((item) => item.group))];
+        return `<span class="${groups.length > 1 ? "is-colocated" : ""}">${placements
+          .sort((a, b) => a.group - b.group || a.role.localeCompare(b.role))
+          .map((item) => `${tenant}-DN-G${item.group}-${item.role}`)
+          .join(" + ")}${groups.length > 1 ? " · 多Group共宿" : ""}</span>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderServerCnTenantMap(roles) {
+  const tenants = [...new Set(roles.map(parseCnTenant).filter(Boolean))];
+  if (!tenants.length) return "";
+  return `<div class="physical-cn-tenant-map ${tenants.length > 1 ? "is-shared" : ""}"><b>CN 租户</b><span>${tenants.join(" + ")}${tenants.length > 1 ? " · 跨租户共宿" : " · 独立"}</span></div>`;
+}
+
 function renderServerRoleDetail(roles) {
   if (!roles.length) return "无组件，作为扩容或故障接管预留";
   const visible = roles.slice(0, 4).join(" / ");
@@ -3032,8 +3679,9 @@ function copySummary() {
     `部署方式：${modeLabels[data.mode]}`,
     `服务器：${data.serverCount} 台，资源状态：${data.resourceState}`,
     `CN：${data.cnPerAz}/AZ，总计 ${data.totalCn}`,
+    `CN 租户部署：${data.resourceReduction.cnTenantPlacementLabel}`,
     `DN：${data.shardCount} Group × ${data.replicasPerShard} 副本 = ${data.dnInstances} 实例`,
-    `GTM：${data.gtmNodes} 实例，${data.gtmBinding.label}`,
+    `GTM：${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 实例，${data.gtmBinding.label}`,
     `GTM 部署亲和：${data.gtmAffinityLabel}`,
     `管理节点：${data.managementNodes} 个（建议不少于 ${data.recommendedManagementNodes} 个）`,
     `综合评分：${data.scores.weighted}/100`,
@@ -3041,10 +3689,11 @@ function copySummary() {
   ].join("\n") : [
     `GoldenDB ${modeLabels[data.mode]} ${shapeLabels[data.shape]} 部署建议`,
     `每 AZ CN：${data.cnPerAz}`,
+    `CN 租户部署：${data.resourceReduction.cnTenantPlacementLabel}`,
     `推荐分片数：${data.shardCount}`,
     `每分片副本：${data.replicasPerShard}`,
     `DN 实例数：${data.dnInstances}`,
-    `GTM：${data.shape === "distributed" ? data.gtmBinding.label : "集中式场景可选"}`,
+    `GTM：${data.shape === "distributed" ? `${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 实例，${data.gtmBinding.label}` : "集中式场景可选"}`,
     `GTM 部署亲和：${data.serverSizing.gtmAffinityLabel}`,
     `管理节点：${data.managementNodes} 个（建议不少于 ${data.recommendedManagementNodes} 个）`,
     `租户关系：租户实例包含 CN 与 DN；分布式租户绑定 GTM，支持 1:1 或 1:n。`,
@@ -3175,6 +3824,80 @@ function loadExportImage(source) {
   });
 }
 
+function getPresetDnLimit(prefix) {
+  if (prefix === "reverse") return integerValue("reverseMaxDnPerServer", 1);
+  const customDnEnabled = $("businessServerConfigMode").value === "customer" && $("customerDnEnabled").checked;
+  return customDnEnabled ? integerValue("customerDnMaxInstances", 1) : 2;
+}
+
+function applyReductionPreset(prefix) {
+  const preset = $(`${prefix}ReductionPreset`).value;
+  if (preset === "custom") return;
+  const maxDnPerServer = getPresetDnLimit(prefix);
+  const layout = $(`${prefix}ComponentLayout`);
+  const affinity = $(`${prefix}GtmAffinity`);
+  const allowShard = $(`${prefix}AllowShardColocation`);
+  const allowCnDn = $(`${prefix}AllowCnDnMixed`);
+  const allowGtmManagement = $(`${prefix}AllowGtmManagementMixed`);
+  const allowAll = $(`${prefix}AllowAllMixed`);
+  const tenantLimit = $(`${prefix}MaxTenantDnPerServer`);
+  const cnTenantPlacement = $(`${prefix}CnTenantPlacement`);
+
+  if (preset === "current") {
+    layout.value = "auto";
+    affinity.value = "auto";
+    allowShard.checked = true;
+    allowCnDn.checked = false;
+    allowGtmManagement.checked = true;
+    allowAll.checked = false;
+    tenantLimit.value = Math.min(2, maxDnPerServer);
+    cnTenantPlacement.value = "auto";
+  } else if (preset === "safe") {
+    layout.value = "gtmMgrMixed";
+    affinity.value = "management";
+    allowShard.checked = true;
+    allowCnDn.checked = false;
+    allowGtmManagement.checked = true;
+    allowAll.checked = false;
+    tenantLimit.value = Math.min(2, maxDnPerServer);
+    cnTenantPlacement.value = "isolated";
+  } else if (preset === "balanced") {
+    layout.value = "cnDnMixed";
+    affinity.value = "management";
+    allowShard.checked = true;
+    allowCnDn.checked = true;
+    allowGtmManagement.checked = true;
+    allowAll.checked = false;
+    tenantLimit.value = maxDnPerServer;
+    cnTenantPlacement.value = "shared";
+  } else if (preset === "maximum") {
+    layout.value = "allMixed";
+    affinity.value = "auto";
+    allowShard.checked = true;
+    allowCnDn.checked = true;
+    allowGtmManagement.checked = true;
+    allowAll.checked = true;
+    tenantLimit.value = maxDnPerServer;
+    cnTenantPlacement.value = "shared";
+  }
+  syncResourceReductionControls();
+}
+
+function markReductionPresetCustom(target) {
+  const prefix = target.id.startsWith("reverse") ? "reverse" : "business";
+  const reductionIds = new Set([
+    `${prefix}ComponentLayout`,
+    `${prefix}GtmAffinity`,
+    `${prefix}AllowShardColocation`,
+    `${prefix}AllowCnDnMixed`,
+    `${prefix}AllowGtmManagementMixed`,
+    `${prefix}AllowAllMixed`,
+    `${prefix}MaxTenantDnPerServer`,
+    `${prefix}CnTenantPlacement`
+  ]);
+  if (reductionIds.has(target.id)) $(`${prefix}ReductionPreset`).value = "custom";
+}
+
 function resetForm() {
   Object.entries(defaults).forEach(([key, value]) => {
     const el = $(key);
@@ -3191,6 +3914,11 @@ function resetForm() {
 function bindParameterEvents() {
   const inputPanel = document.querySelector(".input-panel");
   const handleParameterChange = (event) => {
+    if (event.target.matches("#businessReductionPreset, #reverseReductionPreset")) {
+      applyReductionPreset(event.target.id.startsWith("reverse") ? "reverse" : "business");
+      render();
+      return;
+    }
     if (event.target.matches(".tenant-input")) {
       const update = updateTenantSpec(event.target);
       if (!update) return;
@@ -3210,6 +3938,7 @@ function bindParameterEvents() {
       return;
     }
     if (event.target.matches("input, select")) {
+      markReductionPresetCustom(event.target);
       render();
     }
   };
