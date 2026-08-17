@@ -238,6 +238,73 @@ select:focus {
   margin-bottom: 10px;
 }
 
+.dn-planning-section {
+  margin-bottom: 12px;
+  border-block: 1px solid #29483e;
+}
+
+.dn-planning-group {
+  padding: 12px 0 2px;
+}
+
+.dn-planning-group + .dn-planning-group {
+  border-top: 1px dashed #29483e;
+}
+
+.dn-planning-group-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.dn-planning-group-title strong {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.dn-planning-group-title span {
+  max-width: 72%;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.dn-planning-fields .field {
+  margin-bottom: 4px;
+}
+
+.dn-planning-fields .field > span {
+  display: flex;
+  align-items: flex-end;
+  min-height: 18px;
+}
+
+.dn-planning-result input[readonly] {
+  border-color: #477466;
+  color: var(--accent);
+  background: rgba(59, 215, 176, 0.07);
+  font-weight: 800;
+}
+
+.dn-planning-note {
+  margin: 6px 0 8px;
+  border-left: 3px solid var(--warn);
+  color: var(--muted);
+  background: rgba(255, 200, 87, 0.045);
+  padding: 7px 9px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.dn-planning-note.formula {
+  border-left-color: var(--teal);
+  background: rgba(59, 215, 176, 0.045);
+}
+
 .parameter-advisory {
   display: grid;
   gap: 4px;
@@ -1378,7 +1445,31 @@ td:first-child {
 }
 
 .risk-high {
-  color: var(--danger);
+  color: #ff8f8f;
+}
+
+.risk-list li.risk-high,
+.reduction-status.risk-high {
+  border-left: 3px solid #ff5f67;
+  background: rgba(255, 66, 78, 0.13);
+  color: #ff9da3;
+  padding: 8px 10px;
+}
+
+.density-status {
+  margin-top: 10px;
+  border-left: 3px solid var(--teal);
+  background: rgba(59, 215, 176, 0.08);
+  color: #b9d7cd;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.density-status.invalid {
+  border-left-color: #ff5f67;
+  background: rgba(255, 66, 78, 0.13);
+  color: #ff9da3;
 }
 
 .risk-mid {
@@ -1656,49 +1747,11 @@ a {
 }
 
 .ppt-network-board {
-  padding-top: 124px;
+  padding-top: 58px;
 }
 
 .physical-topology-board {
   padding-top: 14px;
-}
-
-.topology-policy-state {
-  position: absolute;
-  z-index: 3;
-  top: 50px;
-  left: 14px;
-  display: grid;
-  gap: 4px;
-  max-width: calc(100% - 28px);
-  background: rgba(8, 18, 15, 0.94);
-  padding: 5px 7px;
-  pointer-events: none;
-}
-
-.topology-policy-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-left: 3px solid #839b93;
-  padding: 3px 6px;
-}
-
-.topology-policy-row.active {
-  border-left-color: var(--accent);
-}
-
-.topology-policy-state strong {
-  color: var(--accent);
-  font-size: 10px;
-  white-space: nowrap;
-}
-
-.topology-policy-state span {
-  color: #dceee5;
-  font-size: 9px;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
 }
 
 .ppt-workload-row {
@@ -2168,6 +2221,16 @@ a {
   .reduction-summary,
   .metrics {
     grid-template-columns: 1fr;
+  }
+
+  .dn-planning-group-title {
+    display: grid;
+    gap: 4px;
+  }
+
+  .dn-planning-group-title span {
+    max-width: none;
+    text-align: left;
   }
 
   .canvas-panel {

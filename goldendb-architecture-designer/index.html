@@ -119,19 +119,54 @@
 
             <div class="section-headline parameter-headline">
               <div>
-                <span class="section-label">DN 分片规划水位</span>
-                <small>容量和 TPS 均指单个主 DN（单分片）的规划水位；2TB、4000TPS 是公开指南基准，并非产品硬上限，生产应以同规格 POC 压测校准。副本数在各租户中手动设置。</small>
+                <span class="section-label">DN 分片与单节点规格规划</span>
+                <small>录入容量水位和同一套 DN 性能标定，页面统一计算单核 TPS、性能分片数及每分片 DN 规格。标定仅用于初算，生产必须使用同机型、同 SQL 模型完成 POC 校准。</small>
               </div>
             </div>
-            <div class="grid-two">
-              <label class="field">
-                <span>单主 DN（单分片）容量水位 TB</span>
-                <input id="maxShardTb" type="number" min="0.1" step="0.1" value="2">
-              </label>
-              <label class="field">
-                <span>单主 DN（单分片）TPS 水位</span>
-                <input id="safeShardTps" type="number" min="1" value="4000">
-              </label>
+            <div class="dn-planning-section">
+              <section class="dn-planning-group">
+                <div class="dn-planning-group-title">
+                  <strong>规划输入</strong>
+                  <span>容量水位独立参与容量分片；核数、内存和 TPS 必须来自同一标定规格。</span>
+                </div>
+                <div class="grid-two dn-planning-fields">
+                  <label class="field">
+                    <span>单主 DN 容量水位 TB</span>
+                    <input id="maxShardTb" type="number" min="0.1" step="0.1" value="2">
+                  </label>
+                  <label class="field">
+                    <span>DN 标定物理核数</span>
+                    <input id="dnReferenceCores" type="number" min="1" value="16">
+                  </label>
+                  <label class="field">
+                    <span>DN 标定内存 GB</span>
+                    <input id="dnReferenceMemoryGb" type="number" min="1" value="64">
+                  </label>
+                  <label class="field">
+                    <span>DN 标定 TPS</span>
+                    <input id="dnReferenceTps" type="number" min="1" value="2000">
+                  </label>
+                </div>
+                <p class="dn-planning-note">默认标定点：官方指南典型容器规格 16C / 64GB / 单库 2000TPS。客户机型应替换为同机型 POC 标定结果。</p>
+              </section>
+
+              <section class="dn-planning-group dn-planning-result">
+                <div class="dn-planning-group-title">
+                  <strong>自动计算结果</strong>
+                  <span>只读结果，修改上方标定参数后自动联动。</span>
+                </div>
+                <div class="grid-two dn-planning-fields">
+                  <label class="field">
+                    <span>DN 单核 TPS 工程值</span>
+                    <input id="dnSingleCoreTps" type="number" value="125" readonly>
+                  </label>
+                  <label class="field">
+                    <span>单主 DN 性能规划上限 TPS</span>
+                    <input id="safeShardTps" type="number" min="1" value="2000" readonly>
+                  </label>
+                </div>
+                <p class="dn-planning-note formula">单核 TPS = 标定 TPS ÷ 标定物理核数；单主 DN 性能上限 = 标定 TPS。该工程折算用于分片与规格初算，不是厂商性能承诺。</p>
+              </section>
             </div>
 
             <label class="toggle">
@@ -206,6 +241,14 @@
                     <option value="shared">资源混部：不同租户 CN 共享服务器</option>
                   </select>
                 </label>
+                <label class="field">
+                  <span>DN 跨租户部署策略</span>
+                  <select id="businessDnTenantPlacement">
+                    <option value="auto" selected>自动：生产隔离 / POC 混部</option>
+                    <option value="isolated">租户独立：DN 服务器不跨租户</option>
+                    <option value="shared">资源混部：不同租户 DN 共享服务器</option>
+                  </select>
+                </label>
                 <label class="field hidden" aria-hidden="true">
                   <span>组件组合方式（自动派生）</span>
                   <select id="businessComponentLayout" tabindex="-1">
@@ -225,6 +268,7 @@
                   </select>
                 </label>
               </div>
+              <div id="businessDnDensityStatus" class="density-status" aria-live="polite"></div>
               <div class="resource-toggle-grid">
                 <label class="toggle">
                   <input id="businessAllowShardColocation" type="checkbox" checked>
@@ -392,6 +436,14 @@
                     <option value="shared">资源混部：不同租户 CN 共享服务器</option>
                   </select>
                 </label>
+                <label class="field">
+                  <span>DN 跨租户部署策略</span>
+                  <select id="reverseDnTenantPlacement">
+                    <option value="auto" selected>自动：生产隔离 / POC 混部</option>
+                    <option value="isolated">租户独立：DN 服务器不跨租户</option>
+                    <option value="shared">资源混部：不同租户 DN 共享服务器</option>
+                  </select>
+                </label>
                 <label class="field hidden" aria-hidden="true">
                   <span>组件组合方式（自动派生）</span>
                   <select id="reverseComponentLayout" tabindex="-1">
@@ -411,6 +463,7 @@
                   </select>
                 </label>
               </div>
+              <div id="reverseDnDensityStatus" class="density-status" aria-live="polite"></div>
               <div class="resource-toggle-grid">
                 <label class="toggle">
                   <input id="reverseAllowShardColocation" type="checkbox" checked>
@@ -497,7 +550,11 @@
           <div class="metrics">
             <div class="metric-card">
               <span id="cnPerAz">4</span>
-              <small>CN/AZ 汇总</small>
+              <small>CN 总数</small>
+            </div>
+            <div class="metric-card">
+              <span id="tenantCount">1</span>
+              <small>租户个数</small>
             </div>
             <div class="metric-card">
               <span id="shardCount">2</span>
@@ -550,8 +607,9 @@
             <ul class="source-list">
               <li><strong>官方入口</strong>：<a href="https://www.goldendb.com/" target="_blank" rel="noreferrer">GoldenDB 官网</a>。</li>
               <li><strong>架构与部署形态</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/goldendb/%E9%87%91%E7%AF%86%E4%BF%A1%E7%A7%91GoldenDB%E6%95%B0%E6%8D%AE%E5%BA%93V6%E6%8A%80%E6%9C%AF%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf" target="_blank" rel="noreferrer">《GoldenDB 数据库 V6 技术白皮书》</a>，用于核对集中式/分布式组件关系、物理机/容器部署与资源弹性。</li>
-              <li><strong>容量/性能规划</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/mediares/golden_db/pdf/report2024010303.pdf" target="_blank" rel="noreferrer">《GoldenDB 分布式事务型数据库金融应用指南》</a>，分片数按容量与单分片 TPS 预估共同确定。</li>
-              <li><strong>管理节点与 GTM 部署</strong>：上述金融应用指南给出单中心管理节点 3 副本、同城双中心管理节点 3 或 5 副本等规划口径；<a href="https://www.zte.com.cn/china/about/magazine/zte-technologies/2025/12/3/5.html" target="_blank" rel="noreferrer">《国有大行分布式数据库云化部署实践》</a>说明管理节点可保留物理部署、租户组件可运行于容器资源池。页面据此提供 GTM 独立或与管理节点混部，并将“共享资源池”和“同机混部”区别处理。</li>
+              <li><strong>容量/性能规划</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/mediares/golden_db/pdf/report2024010303.pdf" target="_blank" rel="noreferrer">《GoldenDB 分布式事务型数据库金融应用指南》</a>第 2.3 节明确：数据分片数量取容量需求与 TPS/QPS 性能需求的最大值；物理机示例的 4000TPS/40000QPS 对应 2 路24C、384GB 与 SSD，不能脱离该规格直接套用。</li>
+              <li><strong>DN 典型规格与折算边界</strong>：上述指南表 9 给出容器 DN 8C/32GB=1000TPS、16C/64GB=2000TPS、16C/128GB=2000TPS，并建议该容器口径下单 DN 数据量不超过 500GB。页面默认采用 16C/64GB/2000TPS 标定点，将 125TPS/物理核仅作为可编辑的工程初算值；容量水位仍允许按项目机型和 POC 结果录入，不将 500GB、2TB 或按核线性折算视为产品硬上限。</li>
+              <li><strong>管理节点与 GTM 部署</strong>：上述金融应用指南给出单中心管理节点 3 副本、同城双中心/两地三中心管理节点 3 或 5 副本；两地三中心典型 GTM/DN 为同城两侧各 2 副本、异地 1 副本，即推荐 5 副本。<a href="https://www.zte.com.cn/china/about/magazine/zte-technologies/2025/12/3/5.html" target="_blank" rel="noreferrer">《国有大行分布式数据库云化部署实践》</a>说明管理节点可保留物理部署、租户组件可运行于容器资源池。页面允许手工降配，但会按典型建议提示风险。</li>
               <li><strong>资源缩减边界</strong>：金融应用指南公开示例采用 Insight 与 GTM 合设，并按组件性能/容量共同确定服务器数；上述云化部署实践说明 CN、DN、GTM 可容器化并共享硬件资源池。页面仅把不同 Group 共宿、CN/DN 混部作为资源装箱策略，同一 Group 主从副本仍保持物理服务器反亲和。</li>
               <li><strong>CN 跨租户部署</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/goldendb/260423-%E5%86%85%E5%AE%B9%E6%9B%B4%E6%96%B0%E7%B4%A0%E6%9D%90/%E4%B8%AD%E5%85%B4%E9%80%9A%E8%AE%AFGoldenDB%E6%95%B0%E6%8D%AE%E5%BA%93V6%E6%8A%80%E6%9C%AF%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf" target="_blank" rel="noreferrer">GoldenDB V6 技术白皮书</a>说明租户包含 CN/DN/GTM、租户资源与数据隔离，同时支持物理机及容器化部署。页面据此区分“CN 实例归属隔离”和“不同租户 CN 共享物理服务器”，生产自动采用租户独立服务器。</li>
               <li><strong>参考图参数口径</strong>：海光双路 64 物理核、1024GB、双万兆、系统盘 RAID1、NVMe 数据盘属于具体项目服务器基线，页面支持按组件录入，但不将其视为 GoldenDB 产品硬上限或所有项目的统一推荐。</li>
