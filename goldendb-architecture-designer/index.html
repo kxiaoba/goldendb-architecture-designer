@@ -197,6 +197,11 @@
                 <span>资源预留比例</span>
                 <input id="businessReserveRatio" type="number" min="0" max="0.8" step="0.05" value="0.35">
               </label>
+              <label class="field">
+                <span>异地灾备容量比例</span>
+                <input id="businessDrCapacityRatio" type="number" min="0.25" max="1" step="0.05" value="0.5">
+                <small>仅两地三中心、三地五中心生效；1 表示异地具备完整接管容量。</small>
+              </label>
             </div>
 
             <div class="control-plane-settings">
@@ -283,6 +288,10 @@
                   <span>GTM 与管理节点混部</span>
                 </label>
                 <label class="toggle">
+                  <input id="businessAllowGtmGroupColocation" type="checkbox" checked>
+                  <span>不同 GTM Group 可共宿（同组副本仍跨服务器）</span>
+                </label>
+                <label class="toggle">
                   <input id="businessAllowAllMixed" type="checkbox">
                   <span>CN / DN / GTM / 管理全混布（仅 POC）</span>
                 </label>
@@ -293,11 +302,11 @@
               </div>
               <div class="resource-redline-rules">
                 <strong>实时红线</strong>
-                <span>同一 DN Group 或 GTM Group 副本同机、生产全混布、管理节点不足、服务器资源不足时，方案判定为不通过并要求修改。</span>
+                <span>生产同租户多个 CN 同机、同一 DN/GTM Group 副本同机、生产全混布、管理节点不足或服务器资源不足时，方案判定为不通过。</span>
               </div>
               <div class="parameter-advisory">
                 <strong>生产部署边界</strong>
-                <span>跨租户 CN 混部不改变 CN 的租户归属，生产使用时必须配置 CPU/内存配额、容量余量和故障接管能力；核心租户建议使用独立 CN 服务器。CN/DN 混部和同租户多分片共宿还需满足磁盘、IOPS 与网络水位。</span>
+                <span>生产环境同一租户固定一机一 CN，不受机型单机 CN 上限影响。跨租户 CN 混部仅共享物理服务器，仍须配置 CPU/内存配额、容量余量和故障接管能力；核心租户建议使用独立 CN 服务器。</span>
               </div>
             </div>
 
@@ -478,6 +487,10 @@
                   <span>GTM 与管理节点混部</span>
                 </label>
                 <label class="toggle">
+                  <input id="reverseAllowGtmGroupColocation" type="checkbox" checked>
+                  <span>不同 GTM Group 可共宿（同组副本仍跨服务器）</span>
+                </label>
+                <label class="toggle">
                   <input id="reverseAllowAllMixed" type="checkbox">
                   <span>CN / DN / GTM / 管理全混布（仅 POC）</span>
                 </label>
@@ -488,11 +501,11 @@
               </div>
               <div class="resource-redline-rules">
                 <strong>实时红线</strong>
-                <span>同一 DN Group 或 GTM Group 副本同机、生产全混布、管理节点不足、服务器资源不足时，方案判定为不通过并要求修改。</span>
+                <span>生产同租户多个 CN 同机、同一 DN/GTM Group 副本同机、生产全混布、管理节点不足或服务器资源不足时，方案判定为不通过。</span>
               </div>
               <div class="parameter-advisory">
                 <strong>资源缩减边界</strong>
-                <span>资源反推仍以服务器总数为硬约束；跨租户 CN 混部只共享物理服务器，不共享租户实例。若服务器不足以满足 CN 租户隔离或同一 Group 副本反亲和，方案直接判定为高风险。</span>
+                <span>生产环境同一租户固定一机一 CN；跨租户 CN 混部只共享物理服务器，不共享租户实例。服务器不足时不突破该约束，未落位 CN 将触发高风险并要求增加主机。</span>
               </div>
             </div>
           </section>
@@ -614,6 +627,8 @@
               <li><strong>CN 跨租户部署</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/goldendb/260423-%E5%86%85%E5%AE%B9%E6%9B%B4%E6%96%B0%E7%B4%A0%E6%9D%90/%E4%B8%AD%E5%85%B4%E9%80%9A%E8%AE%AFGoldenDB%E6%95%B0%E6%8D%AE%E5%BA%93V6%E6%8A%80%E6%9C%AF%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf" target="_blank" rel="noreferrer">GoldenDB V6 技术白皮书</a>说明租户包含 CN/DN/GTM、租户资源与数据隔离，同时支持物理机及容器化部署。页面据此区分“CN 实例归属隔离”和“不同租户 CN 共享物理服务器”，生产自动采用租户独立服务器。</li>
               <li><strong>参考图参数口径</strong>：海光双路 64 物理核、1024GB、双万兆、系统盘 RAID1、NVMe 数据盘属于具体项目服务器基线，页面支持按组件录入，但不将其视为 GoldenDB 产品硬上限或所有项目的统一推荐。</li>
               <li><strong>副本高可用</strong>：<a href="https://www.zte.com.cn/content/dam/zte-site/res-www-zte-com-cn/mediares/zte/zhengqi/finance/hangyedongcha/GoldenDB.pdf" target="_blank" rel="noreferrer">《GoldenDB 分布式数据库技术白皮书》</a>，Group 由多个 DN 构成，采用一主多备。</li>
+              <li><strong>同城资源对等案例</strong>：<a href="https://www.zte.com.cn/china/about/news/20240408c1/_jcr_content.html" target="_blank" rel="noreferrer">《浙江移动核心系统数据库自主创新实践》</a>公开了同城双活两侧均部署 20 CN、20 分片，DN 为 1 主 3 备且每中心各 2 副本。页面据此将同城生产中心按独立、对等容量计算，不再把一份容量均摊到两个 AZ。</li>
+              <li><strong>异地容量比例边界</strong>：异地灾备缩减比例属于项目 RTO、接管范围与成本约束下的规划输入，并非 GoldenDB 固定产品参数。比例低于 100% 时页面会提示不能承诺全量业务立即接管，生产方案仍需厂商与业务连续性评审。</li>
               <li><strong>架构核对</strong>：<a href="https://www.modb.pro/db/1861230042106310656" target="_blank" rel="noreferrer">GoldenDB 架构概述</a>、<a href="https://www.cnblogs.com/smart-cloud/articles/19176195" target="_blank" rel="noreferrer">GoldenDB 数据库架构与部署</a>。</li>
               <li><strong>租户/水位核对</strong>：<a href="https://www.modb.pro/db/1772275217795223552" target="_blank" rel="noreferrer">GoldenDB 租户管理</a>、<a href="https://www.cnblogs.com/xinxin1222/p/18021912" target="_blank" rel="noreferrer">GoldenDB 安装部署参数</a>。</li>
               <li><strong>案例核对</strong>：<a href="https://www.bankalliance.com.cn/sccba/service/paas/database02/goldend6.1.3/index.html" target="_blank" rel="noreferrer">GoldenDB 6.1.3 金融云服务介绍</a>。</li>
