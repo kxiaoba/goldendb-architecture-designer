@@ -522,6 +522,18 @@ select:focus {
   line-height: 1.35;
 }
 
+.tenant-deployment-field {
+  border-left: 3px solid var(--accent);
+  background: rgba(68, 224, 190, 0.05);
+  padding: 8px;
+}
+
+.tenant-deployment-field small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .compact-field {
   margin-bottom: 8px;
 }
@@ -562,6 +574,78 @@ select:focus {
 .canvas-panel > * {
   min-width: 0;
   max-width: 100%;
+}
+
+.excel-export-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px 20px;
+  align-items: center;
+  border: 1px solid #315a4f;
+  border-left: 4px solid var(--accent);
+  background: #0b1713;
+  padding: 18px;
+}
+
+.excel-export-copy {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.excel-file-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 54px;
+  width: 54px;
+  height: 54px;
+  border: 1px solid #6fa58e;
+  color: #08110f;
+  background: #bdf65a;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.excel-export-copy h2 {
+  margin: 0;
+  font-size: 21px;
+}
+
+.excel-export-copy p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.excel-export-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.excel-export-stats span {
+  border: 1px solid #365c50;
+  padding: 7px 10px;
+  color: #dceee5;
+  background: #0e211b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.excel-export-stats span:nth-child(2) {
+  border-color: #4e88b8;
+}
+
+.excel-export-stats span:nth-child(3) {
+  border-color: #c79632;
+}
+
+.excel-download-btn {
+  min-width: 156px;
+  padding: 10px 14px;
 }
 
 .canvas-head p {
@@ -1917,11 +2001,24 @@ a {
   font-size: 10px;
 }
 
+.ppt-server-head strong {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
 .ppt-host-group-title span,
 .rack-title span,
 .ppt-server-head span {
   color: var(--muted);
   font-size: 9px;
+}
+
+.ppt-server-head span {
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .ppt-logical-server-grid,
@@ -2273,6 +2370,14 @@ a {
 
   .canvas-panel {
     min-height: 720px;
+  }
+
+  .excel-export-card {
+    grid-template-columns: 1fr;
+  }
+
+  .excel-download-btn {
+    width: 100%;
   }
 
   .relation-line,
