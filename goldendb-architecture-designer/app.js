@@ -248,6 +248,96 @@ const defaultReverseTenants = [
 let businessTenantSpecs = cloneTenantSpecs(defaultBusinessTenants);
 let reverseTenantSpecs = cloneTenantSpecs(defaultReverseTenants);
 let latestDesignData = null;
+const planActionIds = ["copyBtn", "downloadExcelBtn", "downloadTopologyBtn", "downloadServerTopologyBtn"];
+const planningLimits = Object.freeze({ tenants: 100, instances: 2000, servers: 2000 });
+
+class PlanningInputError extends Error {}
+
+function numericInputError(raw, label, { min = 1, max = Number.MAX_SAFE_INTEGER, integer = false } = {}) {
+  if (raw === null || raw === undefined || String(raw).trim() === "") return `${label}不能为空`;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return `${label}必须是有限数值`;
+  if (value < min) return `${label}不得小于 ${min}`;
+  if (value > max) return `${label}不得大于 ${max}`;
+  if (integer && !Number.isSafeInteger(value)) return `${label}必须是整数`;
+  return null;
+}
+
+function getPlanningInputIssues(module = $("designModule").value) {
+  const issues = [];
+  const panel = $(module === "reverse" ? "reverseParams" : "businessParams");
+  panel.querySelectorAll('input[type="number"][id]').forEach((field) => {
+    if (field.readOnly || field.disabled) return;
+    const label = field.closest("label")?.querySelector("span")?.textContent || field.id;
+    const error = numericInputError(field.value, label, {
+      min: field.min === "" ? 1 : Number(field.min),
+      // The density ceiling is a deployment redline, not a malformed input.
+      max: field.id.endsWith("MaxTenantDnPerServer") || field.max === "" ? Number.MAX_SAFE_INTEGER : Number(field.max),
+      integer: field.step === "" || field.step === "1"
+    });
+    if (error) issues.push(error);
+  });
+  const specs = module === "reverse" ? reverseTenantSpecs : businessTenantSpecs;
+  if (!specs.length || specs.length > planningLimits.tenants) issues.push(`本地规划支持 1 至 ${planningLimits.tenants} 个租户（浏览器规模保护，非产品限制）`);
+  specs.forEach((tenant, index) => {
+    const rules = module === "reverse"
+      ? { cnPerAz: [1, true], cnCores: [1, true], cnMemoryGb: [1, true], dnCores: [1, true], dnMemoryGb: [1, true] }
+      : { qps: [1, true], dataTb: [0.1, false] };
+    if (module === "reverse" && tenant.type !== "centralized") rules.shardCount = [1, true];
+    if (module === "business" && tenant.cnPerAzManual) rules.cnPerAz = [1, true];
+    if (module === "business" && tenant.minShardsManual && $("dbShape").value === "distributed" && tenant.type === "distributed") rules.minShards = [1, true];
+    rules.replicaCount = [1, true, 7];
+    const labels = { qps: "SQL QPS", dataTb: "数据量 TB", cnPerAz: "CN/AZ", minShards: "DN Group", shardCount: "DN Group", replicaCount: "每分片副本数", cnCores: "CN 核数", cnMemoryGb: "CN 内存", dnCores: "DN 核数", dnMemoryGb: "DN 内存" };
+    Object.entries(rules).forEach(([key, [min, integer, max]]) => {
+      const error = numericInputError(tenant[key], `租户 ${index + 1} ${labels[key]}`, { min, integer, max });
+      if (error) issues.push(error);
+    });
+  });
+  return issues;
+}
+
+function assertPlanningInputs(module) {
+  const issues = getPlanningInputIssues(module);
+  if (issues.length) throw new PlanningInputError(issues.join("；"));
+}
+
+function assertPlanningScale(count, kind) {
+  if (!Number.isSafeInteger(count) || count < 0 || count > planningLimits[kind]) {
+    throw new PlanningInputError(`方案超出本地浏览器规模保护范围：${kind === "servers" ? "服务器" : "组件实例"}最多 ${planningLimits[kind]} 个。请缩小单次规划范围；这不是 GoldenDB 产品容量限制。`);
+  }
+}
+
+function syncPlanActionAvailability() {
+  planActionIds.forEach((id) => {
+    $(id).disabled = !latestDesignData || $(id).dataset.busy === "true";
+  });
+}
+
+function invalidatePlanningResult(messages) {
+  latestDesignData = null;
+  const message = `参数未通过，当前方案已失效。${messages.join("；")}`;
+  $("planningInputStatus").hidden = false;
+  $("planningInputStatus").textContent = message;
+  ["topology", "serverTopology", "relationGraph", "formulaOutput", "businessServerPlan", "reversePlan", "reductionPlan", "haGuide"].forEach((id) => { $(id).textContent = "参数未通过，暂无有效方案。"; });
+  $("nodePlan").replaceChildren();
+  const risk = document.createElement("li");
+  risk.className = "risk-high";
+  risk.textContent = message;
+  $("riskList").replaceChildren(risk);
+  ["summaryCn", "summaryShard", "cnPerAz", "tenantCount", "shardCount", "replicasPerShard", "dnInstances"].forEach((id) => { $(id).textContent = "—"; });
+  $("summaryMode").textContent = "参数未通过";
+  $("summaryShape").textContent = "方案已失效";
+  $("excelExportStats").textContent = "参数未通过，无法导出。";
+  $("excelExportSubtitle").textContent = "暂无有效规划数据。";
+  $("topologySubtitle").textContent = "参数未通过，暂无有效规划数据。";
+  syncPlanActionAvailability();
+}
+
+function getCurrentPlanForAction() {
+  const issues = getPlanningInputIssues();
+  if (issues.length) invalidatePlanningResult(issues);
+  return issues.length ? null : latestDesignData;
+}
 
 function cloneTenantSpecs(specs) {
   return specs.map((item) => ({ ...item }));
@@ -274,8 +364,11 @@ function getTenantResourcePoolLabel(tenant) {
 }
 
 function numberValue(id) {
-  const value = Number($(id).value);
-  return Number.isFinite(value) ? value : defaults[id];
+  const raw = $(id).value;
+  if (raw.trim() === "" || !Number.isFinite(Number(raw))) {
+    throw new PlanningInputError(`${$(id).closest("label")?.querySelector("span")?.textContent || id}不能为空且必须是有限数值`);
+  }
+  return Number(raw);
 }
 
 function integerValue(id, min = 0) {
@@ -306,7 +399,7 @@ function getResourceReductionConfig(prefix, environment, maxDnPerServer) {
   const allowGtmManagementMixed = $(`${prefix}AllowGtmManagementMixed`).checked;
   const allowGtmGroupColocation = $(`${prefix}AllowGtmGroupColocation`).checked;
   const allowAllMixed = $(`${prefix}AllowAllMixed`).checked;
-  const configuredTenantLimit = integerValue(`${prefix}MaxTenantDnPerServer`, 1);
+  const configuredTenantLimit = allowShardColocation ? integerValue(`${prefix}MaxTenantDnPerServer`, 1) : 1;
   let requestedComponentLayout = "dedicated";
   let requestedGtmAffinity = "dedicated";
   if (allowAllMixed) {
@@ -383,6 +476,7 @@ function getCnPlacementFloors(tenantPlans, azCount, maxCnPerServer, cnTenantPlac
 }
 
 function calculate() {
+  assertPlanningInputs("business");
   const environment = $("environmentType").value;
   const mode = $("deploymentMode").value;
   const shape = $("dbShape").value;
@@ -459,6 +553,7 @@ function calculate() {
   const gtmNodes = shape === "distributed" && gtmBinding.kind !== "none"
     ? gtmBinding.groupCount * gtmReplicasPerGroup
     : 0;
+  assertPlanningScale(totalCn + dnInstances + gtmNodes + managementNodes, "instances");
   applyGtmLabels(tenantPlans, gtmBinding, gtmNodes);
   const gtmPerPrimaryAz = shape === "distributed" && distributedTenants > 0
     ? Math.max(1, Math.ceil(gtmNodes / Math.max(1, azCount - 1)))
@@ -547,6 +642,7 @@ function calculate() {
 }
 
 function calculateReverse() {
+  assertPlanningInputs("reverse");
   const environment = $("environmentType").value;
   const mode = $("reverseDeploymentMode").value;
   const goal = $("reverseGoal").value;
@@ -584,6 +680,7 @@ function calculateReverse() {
   const configuredGtmReplicasPerGroup = integerValue("reverseGtmReplicasPerGroup", 0);
   const gtmReplicasPerGroup = configuredGtmReplicasPerGroup || recommendedGtmReplicasPerGroup;
   const gtmNodes = gtmBinding.kind === "none" ? 0 : gtmBinding.groupCount * gtmReplicasPerGroup;
+  assertPlanningScale(tenantPlans.reduce((sum, tenant) => sum + tenant.totalCn + tenant.dnInstances, 0) + gtmNodes + managementNodes, "instances");
   applyGtmLabels(tenantPlans, gtmBinding, gtmNodes);
   const cnPerAz = tenantPlans.reduce((sum, tenant) => sum + tenant.cnPerAz, 0);
   const totalCn = cnPerAz * azCount;
@@ -1580,6 +1677,7 @@ function distributeHostGroupCount(total, buckets, mode, componentKeys) {
 }
 
 function buildBusinessPhysicalServerPlan(config) {
+  assertPlanningScale(config.componentSizing.recommendedServers, "servers");
   const azNames = getAzNames(config.mode, config.azCount);
   const groupedByAz = azNames.map(() => []);
 
@@ -1591,6 +1689,7 @@ function buildBusinessPhysicalServerPlan(config) {
   poolSizings.forEach((pool) => {
     pool.siteSizing.forEach((siteSizing, azIndex) => {
       getBusinessHostGroups(config.componentLayout, siteSizing).forEach((group) => {
+        assertPlanningScale(groupedByAz.reduce((sum, sites) => sum + sites.length, 0) + group.count, "servers");
         for (let index = 0; index < group.count; index += 1) {
           groupedByAz[azIndex].push({
             ...group,
@@ -2118,6 +2217,7 @@ function getServerCountByAz(serverPlan, mode, azCount) {
 }
 
 function buildServerPlan(config) {
+  assertPlanningScale(config.serverCount, "servers");
   const azNames = getAzNames(config.mode, config.azCount);
   const servers = Array.from({ length: config.serverCount }, (_, index) => ({
     id: `Server-${String(index + 1).padStart(2, "0")}`,
@@ -2416,7 +2516,11 @@ function getBusinessGtmNodes(shape, mode, binding, environment) {
 }
 
 function buildBusinessTenantPlans(data) {
-  return data.specs.map((spec, index) => {
+  ["sqlPerTxn", "cnSingleNodeTps", "growthPower", "maxShardTb", "safeShardTps"].forEach((key) => {
+    const error = numericInputError(data[key], key, { min: Number.MIN_VALUE });
+    if (error) throw new PlanningInputError(error);
+  });
+  const plans = data.specs.map((spec, index) => {
     const tenantNo = index + 1;
     const deploymentStrategy = getTenantDeploymentStrategy(spec, index);
     const isDistributed = data.shape === "distributed" && spec.type === "distributed";
@@ -2512,10 +2616,12 @@ function buildBusinessTenantPlans(data) {
       gtmGroupText: "待绑定"
     };
   });
+  assertPlanningScale(plans.reduce((sum, tenant) => sum + tenant.totalCn + tenant.dnInstances, 0), "instances");
+  return plans;
 }
 
 function buildReverseTenantPlans(data) {
-  return data.specs.map((spec, index) => {
+  const plans = data.specs.map((spec, index) => {
     const tenantNo = index + 1;
     const deploymentStrategy = getTenantDeploymentStrategy(spec, index);
     const isDistributed = spec.type !== "centralized";
@@ -2564,6 +2670,8 @@ function buildReverseTenantPlans(data) {
       gtmGroupText: "待绑定"
     };
   });
+  assertPlanningScale(plans.reduce((sum, tenant) => sum + tenant.totalCn + tenant.dnInstances, 0), "instances");
+  return plans;
 }
 
 function recommendCnNodeSpec(data) {
@@ -2696,13 +2804,28 @@ function getReplicaCount(mode, shape, environment = "production") {
 function render(options = {}) {
   const shouldRenderTenantEditors = options.tenantEditors !== false;
   syncParameterPanels();
-  syncBusinessTenantAutoValues();
+  const issues = getPlanningInputIssues();
+  if (!issues.length && $("designModule").value === "business") syncBusinessTenantAutoValues();
   if (shouldRenderTenantEditors) {
     renderTenantEditors();
   }
+  if (issues.length) {
+    invalidatePlanningResult(issues);
+    return;
+  }
   const isReverse = $("designModule").value === "reverse";
-  const data = isReverse ? calculateReverse() : calculate();
+  let data;
+  try {
+    data = isReverse ? calculateReverse() : calculate();
+  } catch (error) {
+    if (!(error instanceof PlanningInputError)) throw error;
+    invalidatePlanningResult([error.message]);
+    return;
+  }
   latestDesignData = data;
+  $("planningInputStatus").hidden = true;
+  $("planningInputStatus").textContent = "";
+  syncPlanActionAvailability();
   renderSummary(data);
   renderMetrics(data);
   renderNodePlan(data);
@@ -2810,7 +2933,7 @@ function renderBusinessTenantEditor() {
     return `
       <article class="tenant-editor-card" data-tenant-index="${index}" data-tenant-mode="business">
       <div class="tenant-editor-title">
-        <strong>${normalizeTenantName(tenant.name, index + 1)}</strong>
+        <strong>${escapeAttr(normalizeTenantName(tenant.name, index + 1))}</strong>
         <button class="ghost-btn icon-btn tenant-remove-btn" type="button" data-action="remove-business-tenant" data-index="${index}" ${businessTenantSpecs.length === 1 ? "disabled" : ""}>删除</button>
       </div>
       <label class="field compact-field">
@@ -2863,7 +2986,7 @@ function renderBusinessTenantEditor() {
         ` : ""}
         <label class="field compact-field">
           <span>每分片副本数（含 1 个主副本）</span>
-          <input class="tenant-input" data-mode="business" data-index="${index}" data-key="replicaCount" type="number" min="1" max="7" value="${tenant.replicaCount || 1}">
+          <input class="tenant-input" data-mode="business" data-index="${index}" data-key="replicaCount" type="number" min="1" max="7" value="${tenant.replicaCount}">
         </label>
       </div>
     </article>
@@ -2875,7 +2998,7 @@ function renderReverseTenantEditor() {
   $("reverseTenantEditor").innerHTML = reverseTenantSpecs.map((tenant, index) => `
     <article class="tenant-editor-card" data-tenant-index="${index}" data-tenant-mode="reverse">
       <div class="tenant-editor-title">
-        <strong>${normalizeTenantName(tenant.name, index + 1)}</strong>
+        <strong>${escapeAttr(normalizeTenantName(tenant.name, index + 1))}</strong>
         <button class="ghost-btn icon-btn tenant-remove-btn" type="button" data-action="remove-reverse-tenant" data-index="${index}" ${reverseTenantSpecs.length === 1 ? "disabled" : ""}>删除</button>
       </div>
       <label class="field compact-field">
@@ -2947,14 +3070,14 @@ function syncResourceReductionControls() {
     tenantLimitInput.disabled = !$(`${prefix}AllowShardColocation`).checked;
     const machineLimit = prefix === "business"
       ? ($("businessServerConfigMode").value === "customer" && $(componentInputId("dn", "Enabled")).checked
-        ? integerValue(componentInputId("dn", "MaxInstances"), 1)
+        ? Number($(componentInputId("dn", "MaxInstances")).value)
         : componentServerDefinitions.find((item) => item.key === "dn").maxInstances)
-      : integerValue("reverseMaxDnPerServer", 1);
+      : Number($("reverseMaxDnPerServer").value);
     tenantLimitInput.max = String(machineLimit);
-    const configured = Math.max(1, Number(tenantLimitInput.value) || 1);
+    const configured = Number(tenantLimitInput.value);
     const status = $(`${prefix}DnDensityStatus`);
     if (!status) return;
-    const valid = configured <= machineLimit;
+    const valid = Number.isSafeInteger(configured) && configured >= 1 && Number.isSafeInteger(machineLimit) && machineLimit >= 1 && configured <= machineLimit;
     status.className = `density-status ${valid ? "valid" : "invalid"}`;
     status.textContent = valid
       ? `密度校验通过：单机同租户 DN 上限 ${configured} ≤ 当前 DN 机型单机总实例上限 ${machineLimit}。`
@@ -4633,8 +4756,9 @@ function renderLinks(links) {
 }
 
 function copySummary() {
+  const data = getCurrentPlanForAction();
+  if (!data) return;
   const isReverse = $("designModule").value === "reverse";
-  const data = isReverse ? calculateReverse() : calculate();
   const summary = isReverse ? [
     `GoldenDB 资源约束反推架构`,
     `环境/目标：${environmentLabels[data.environment]} · ${goalLabels[data.goal]}`,
@@ -5245,38 +5369,54 @@ function createExcelWorkbook(sheets) {
 }
 
 function downloadExcelPlan() {
-  const data = latestDesignData || ($("designModule").value === "reverse" ? calculateReverse() : calculate());
+  const data = getCurrentPlanForAction();
+  if (!data) return;
   const button = $("downloadExcelBtn");
   const originalLabel = button.textContent;
   button.disabled = true;
+  button.dataset.busy = "true";
   button.textContent = "正在生成 Excel...";
-  const blob = createExcelWorkbook(buildExcelSheets(data));
-  const link = document.createElement("a");
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const url = URL.createObjectURL(blob);
-  link.href = url;
-  link.download = `goldendb-architecture-plan-${data.mode}-${date}.xlsx`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  button.textContent = "Excel 已下载";
-  setTimeout(() => {
-    button.disabled = false;
-    button.textContent = originalLabel;
-  }, 1400);
+  try {
+    const blob = createExcelWorkbook(buildExcelSheets(data));
+    const link = document.createElement("a");
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = `goldendb-architecture-plan-${data.mode}-${date}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    button.textContent = "Excel 已下载";
+  } catch (error) {
+    console.error("Excel 生成失败", error);
+    button.textContent = "生成失败，请重试";
+  } finally {
+    setTimeout(() => {
+      delete button.dataset.busy;
+      syncPlanActionAvailability();
+      button.textContent = originalLabel;
+    }, 1400);
+  }
 }
 
 async function downloadTopologyImage(targetId, buttonId, filePrefix) {
+  const data = getCurrentPlanForAction();
+  if (!data) return;
   const target = $(targetId);
   const button = $(buttonId);
   if (!target || !button) return;
 
   const originalLabel = button.textContent;
   button.disabled = true;
+  button.dataset.busy = "true";
   button.textContent = "正在生成 PNG...";
   try {
     const blob = await renderElementToPng(target);
+    if (latestDesignData !== data) {
+      button.textContent = "参数已改变，请重新下载";
+      return;
+    }
     const link = document.createElement("a");
     const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     const mode = latestDesignData?.mode || ($("designModule").value === "reverse"
@@ -5297,7 +5437,8 @@ async function downloadTopologyImage(targetId, buttonId, filePrefix) {
     button.textContent = "生成失败，请重试";
   } finally {
     setTimeout(() => {
-      button.disabled = false;
+      delete button.dataset.busy;
+      syncPlanActionAvailability();
       button.textContent = originalLabel;
     }, 1600);
   }
@@ -5492,6 +5633,8 @@ function markReductionPresetCustom(target) {
 }
 
 function resetForm() {
+  businessTenantSpecs = cloneTenantSpecs(defaultBusinessTenants);
+  reverseTenantSpecs = cloneTenantSpecs(defaultReverseTenants);
   Object.entries(defaults).forEach(([key, value]) => {
     const el = $(key);
     if (!el) return;
@@ -5507,6 +5650,12 @@ function resetForm() {
 function bindParameterEvents() {
   const inputPanel = document.querySelector(".input-panel");
   const handleParameterChange = (event) => {
+    // A hidden field can emit its final change event after switching modules.
+    const section = event.target.closest(".parameter-section");
+    const activeSection = $("designModule").value === "reverse" ? "reverseParams" : "businessParams";
+    if (section && section.id !== activeSection) return;
+    // Text/number edits already update on input; a later blur must not rebuild a new field under the cursor.
+    if (event.type === "change" && event.target.matches('input:not([type="checkbox"])')) return;
     if (event.target.matches("#businessReductionPreset, #reverseReductionPreset")) {
       applyReductionPreset(event.target.id.startsWith("reverse") ? "reverse" : "business");
       render();
@@ -5515,9 +5664,6 @@ function bindParameterEvents() {
     if (event.target.matches(".tenant-input")) {
       const update = updateTenantSpec(event.target);
       if (!update) return;
-      if (update.mode === "business" && ["dataTb", "qps"].includes(update.key)) {
-        syncBusinessTenantAutoValues(update.index);
-      }
       if (["type", "deploymentStrategy"].includes(update.key)) {
         render();
         return;
@@ -5526,7 +5672,6 @@ function bindParameterEvents() {
       return;
     }
     if (event.target.matches("#maxShardTb, #dnReferenceCores, #dnReferenceMemoryGb, #dnReferenceTps, #growthFactor, #years, #forceEven, #sqlPerTxn, #singleCoreTps, #cpuCores, #cpuLimit")) {
-      syncBusinessTenantAutoValues();
       render();
       return;
     }
@@ -5566,7 +5711,6 @@ function bindParameterEvents() {
       if (!tenant) return;
       if (action === "auto-business-cn") tenant.cnPerAzManual = false;
       if (action === "auto-business-shards") tenant.minShardsManual = false;
-      syncBusinessTenantAutoValues(index);
       render();
     }
   });
@@ -5597,7 +5741,7 @@ function updateTenantSpec(input) {
   if (!target) return;
   const key = input.dataset.key;
   const numericKeys = new Set(["qps", "dataTb", "minShards", "replicaCount", "cnPerAz", "shardCount", "cnCores", "cnMemoryGb", "dnCores", "dnMemoryGb"]);
-  target[key] = numericKeys.has(key) ? Number(input.value) : input.value;
+  target[key] = numericKeys.has(key) && input.value.trim() !== "" ? Number(input.value) : input.value;
   if (mode === "business" && key === "minShards") {
     target.minShardsManual = true;
   }
@@ -5608,6 +5752,7 @@ function updateTenantSpec(input) {
 }
 
 function syncBusinessTenantAutoValues(index = null) {
+  if (getPlanningInputIssues("business").length) return;
   const tenants = index === null
     ? businessTenantSpecs.map((tenant, tenantIndex) => ({ tenant, tenantIndex }))
     : [{ tenant: businessTenantSpecs[index], tenantIndex: index }];
@@ -5686,8 +5831,6 @@ function createBusinessTenantSpec(index) {
     minShardsManual: false,
     replicaCount: getReplicaCount($("deploymentMode").value, $("dbShape").value, $("environmentType").value)
   };
-  tenant.cnPerAz = calculateSuggestedCnPerAz(tenant);
-  tenant.minShards = calculateSuggestedMinShards(tenant);
   return {
     ...tenant
   };

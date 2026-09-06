@@ -2478,3 +2478,16 @@ a {
     grid-column: auto;
   }
 }
+/* Input errors remain in document flow instead of covering the topology. */
+.planning-input-status {
+  color: #ff7279;
+  border-left: 3px solid #ff7279;
+  background: #211315;
+  padding: 12px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.planning-input-status[hidden] { display: none; }
