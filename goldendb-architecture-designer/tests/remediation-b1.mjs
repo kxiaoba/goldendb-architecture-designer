@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = path.dirname(project);
-const out = path.join(workspace, 'outputs/goldendb-remediation-20260906/evidence');
+const originalEvidence = path.join(workspace, 'outputs/goldendb-remediation-20260906/evidence');
+const out = process.env.REMEDIATION_TEST_OUTPUT || originalEvidence;
 const runtime = process.env.PLAYWRIGHT_MODULE || '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs';
 const { chromium } = await import(runtime);
 fs.mkdirSync(out, { recursive: true });
@@ -68,7 +69,7 @@ for (const id of ['T1', 'T2', 'B1', 'B2']) {
 try {
   // Compare complete model data, not merely the headline component counts.
   const baseline = {};
-  await load(path.join(out, 'baseline/goldendb-architecture-designer'));
+  await load(path.join(originalEvidence, 'baseline/goldendb-architecture-designer'));
   for (const fixture of fixtures) {
     await setup(fixture.parameters, fixture.tenants);
     baseline[fixture.id] = await page.evaluate(() => JSON.stringify(latestDesignData));

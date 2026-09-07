@@ -1,11 +1,12 @@
 """Read-only checks of the workbook actually downloaded by the browser test."""
 from pathlib import Path
 import json
+import os
 import zipfile
 import openpyxl
 
 root = Path(__file__).resolve().parents[2]
-directory = root / 'outputs/goldendb-remediation-20260906/evidence'
+directory = Path(os.environ.get('REMEDIATION_TEST_OUTPUT', str(root / 'outputs/goldendb-remediation-20260906/evidence')))
 expected = json.loads((directory / 'b1-export-sheets.json').read_text())
 source = max(directory.glob('b1-*.xlsx'), key=lambda p: p.stat().st_mtime)
 workbook = openpyxl.load_workbook(source, data_only=False)

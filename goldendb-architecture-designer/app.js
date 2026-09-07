@@ -3182,7 +3182,7 @@ function renderNodePlan(data) {
   ];
 
   $("nodePlan").innerHTML = rows
-    .map(([key, value]) => `<tr><td>${key}</td><td>${value}</td></tr>`)
+    .map(([key, value]) => `<tr><td>${escapeAttr(key)}</td><td>${escapeAttr(value)}</td></tr>`)
     .join("");
 }
 
@@ -3281,7 +3281,7 @@ function renderRisks(data) {
     }
     risks.push(["risk-ok", data.environment === "poc" ? "POC 方案用于功能、兼容性和性能趋势验证，不建议直接照搬生产。" : "生产方案优先副本隔离、管理面 HA、GTM 主备和资源预留。"]);
     $("riskList").innerHTML = risks
-      .map(([cls, text]) => `<li class="${cls}">${text}</li>`)
+      .map(([cls, text]) => `<li class="${escapeAttr(cls)}">${escapeAttr(text)}</li>`)
       .join("");
     return;
   }
@@ -3400,7 +3400,7 @@ function renderRisks(data) {
   risks.push(["risk-ok", "Team/Group、高低水位属于版本相关配置，生产实施需回查 GoldenDB 版本手册。"]);
 
   $("riskList").innerHTML = risks
-    .map(([cls, text]) => `<li class="${cls}">${text}</li>`)
+    .map(([cls, text]) => `<li class="${escapeAttr(cls)}">${escapeAttr(text)}</li>`)
     .join("");
 }
 
@@ -3418,7 +3418,7 @@ function renderHaGuide(data) {
   $("haGuide").innerHTML = `
     <article class="ha-item">
       <strong>Group 分片组</strong>
-      <span>每个 Group 对应一个数据分片，并由 1 个主 DN 和若干从 DN 组成。${tenantReplicaText}。当前共 ${data.shardCount} 个 Group、${data.dnInstances} 个 DN 实例。</span>
+      <span>每个 Group 对应一个数据分片，并由 1 个主 DN 和若干从 DN 组成。${escapeAttr(tenantReplicaText)}。当前共 ${data.shardCount} 个 Group、${data.dnInstances} 个 DN 实例。</span>
     </article>
     <article class="ha-item">
       <strong>Team 同步域</strong>
@@ -3430,7 +3430,7 @@ function renderHaGuide(data) {
     </article>
     <article class="ha-item">
       <strong>GTM 关系</strong>
-      <span>${gtmLine}</span>
+      <span>${escapeAttr(gtmLine)}</span>
     </article>
     <article class="ha-item">
       <strong>二次校验</strong>
@@ -3551,7 +3551,7 @@ function renderReversePlan(data) {
   ];
   $("reversePlan").innerHTML = `
     <div class="reverse-card-grid">
-      ${cards.map(([key, value]) => `<div class="reverse-card"><span>${key}</span><strong>${value}</strong></div>`).join("")}
+      ${cards.map(([key, value]) => `<div class="reverse-card"><span>${escapeAttr(key)}</span><strong>${escapeAttr(value)}</strong></div>`).join("")}
     </div>
     <div class="server-plan-list">
       ${data.serverPlan.map(renderServerPlanRow).join("")}
@@ -3616,8 +3616,8 @@ function renderReductionPlan(data) {
       <div class="reduction-stat"><span>估算缩减</span><strong>${sizing.savedServers} 台 / ${round(sizing.savingRatio * 100)}%</strong></div>
     </div>
     <p class="reduction-status ${statusClass}">${statusText}</p>
-    ${redlines.length ? `<div class="redline-output"><strong>必须修改</strong><ul>${redlines.map((item) => `<li>${item}</li>`).join("")}</ul></div>` : ""}
-    <ul class="reduction-advice">${advice.map((item) => `<li>${item}</li>`).join("")}</ul>
+    ${redlines.length ? `<div class="redline-output"><strong>必须修改</strong><ul>${redlines.map((item) => `<li>${escapeAttr(item)}</li>`).join("")}</ul></div>` : ""}
+    <ul class="reduction-advice">${advice.map((item) => `<li>${escapeAttr(item)}</li>`).join("")}</ul>
   `;
 }
 
@@ -3748,7 +3748,7 @@ function renderBusinessServerPlan(data) {
 
   $("businessServerPlan").innerHTML = `
     <div class="reverse-card-grid">
-      ${cards.map(([key, value]) => `<div class="reverse-card"><span>${key}</span><strong>${value}</strong></div>`).join("")}
+      ${cards.map(([key, value]) => `<div class="reverse-card"><span>${escapeAttr(key)}</span><strong>${escapeAttr(value)}</strong></div>`).join("")}
     </div>
     <div class="component-spec-output">
       ${componentServerDefinitions.map(({ key, label }) => {
@@ -3758,9 +3758,9 @@ function renderBusinessServerPlan(data) {
           <article class="component-spec-row">
             <div><strong>${label}</strong><span>${spec.sourceLabel} · ${getComponentPlacementLabel(sizing.componentLayout, key)}</span></div>
             <b>${requirement.servers} 台</b>
-            <small>${spec.model} · ${spec.cpuModel} · ${spec.archLabel} · ${spec.osLabel}</small>
+            <small>${escapeAttr(spec.model)} · ${escapeAttr(spec.cpuModel)} · ${escapeAttr(spec.archLabel)} · ${escapeAttr(spec.osLabel)}</small>
             <i>${spec.sockets}路 / ${spec.cores}总物理核 / ${spec.memoryGb}GB · 数据盘 ${spec.dataDiskTb}TB×${spec.dataDiskCount}=${round(spec.diskTb)}TB · 单机≤${spec.maxInstances}实例</i>
-            <i>网络 ${spec.network} · 系统盘 ${spec.systemDisk}</i>
+            <i>网络 ${escapeAttr(spec.network)} · 系统盘 ${escapeAttr(spec.systemDisk)}</i>
             <em>独立口径 Max(实例 ${requirement.byInstances}, CPU ${requirement.byCpu}, 内存 ${requirement.byMemory}, 磁盘 ${requirement.byDisk}, 反亲和/租户密度 ${requirement.byAffinity})</em>
           </article>
         `;
@@ -3796,8 +3796,8 @@ function renderBusinessPhysicalServerRow(server) {
     <article class="server-row physical-output-row">
       <strong>${server.id}</strong>
       <span>${server.az} / ${server.rack}</span>
-      <small>${server.tenantPoolLabel || "现有集群共享服务器"} / ${server.hostGroup}：${server.roles.length ? server.roles.join(" / ") : "故障接管与扩容预留"}</small>
-      <i>${specText}</i>
+      <small>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")} / ${escapeAttr(server.hostGroup)}：${escapeAttr(server.roles.length ? server.roles.join(" / ") : "故障接管与扩容预留")}</small>
+      <i>${escapeAttr(specText)}</i>
     </article>
   `;
 }
@@ -3808,7 +3808,7 @@ function renderServerPlanRow(server) {
     <article class="server-row">
       <strong>${server.id}</strong>
       <span>${server.az}</span>
-      <small>${server.tenantPoolLabel || "现有集群共享服务器"}：${roleText}</small>
+      <small>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")}：${escapeAttr(roleText)}</small>
       <i>CPU ${server.cpuLoad}% / 磁盘 ${server.diskLoad}%</i>
     </article>
   `;
@@ -3944,7 +3944,7 @@ function renderTenantDnPlacement(placements) {
     <div class="ppt-dn-placement ${uniqueGroups.length > 1 ? "is-colocated" : ""}">
       ${uniqueGroups.length > 1 ? `<span class="group-colocation-badge">同租户多 Group 共宿 · ${uniqueGroups.map((group) => `G${group}`).join(" + ")}</span>` : ""}
       <div class="ppt-dn-group-list">
-        ${placements.map((item) => `<span class="ppt-dn-group-token">${item.tenant}-DN-G${item.group}-${item.role}</span>`).join("")}
+        ${placements.map((item) => `<span class="ppt-dn-group-token">${escapeAttr(item.tenant)}-DN-G${item.group}-${escapeAttr(item.role)}</span>`).join("")}
       </div>
     </div>
   `;
@@ -3961,12 +3961,12 @@ function renderPptNetworkPlan(data) {
       <section class="ppt-site-column ${isDisasterSite(data.mode, azIndex) ? "disaster" : ""}">
         <header><strong>${az}</strong><span>${getSiteRole(data.mode, azIndex)}</span></header>
         <div class="ppt-site-apps">
-          ${data.tenantPlans.slice(0, 4).map((tenant) => `<span>${tenant.name}业务接入</span>`).join("")}
+          ${data.tenantPlans.slice(0, 4).map((tenant) => `<span>${escapeAttr(tenant.name)}业务接入</span>`).join("")}
         </div>
         <div class="ppt-host-groups">
           ${grouped.map(([groupName, groupServers]) => `
             <section class="ppt-host-group">
-              <div class="ppt-host-group-title"><strong>${groupName}</strong><span>${groupServers.length} 台</span></div>
+              <div class="ppt-host-group-title"><strong>${escapeAttr(groupName)}</strong><span>${groupServers.length} 台</span></div>
               <div class="ppt-logical-server-grid">
                 ${groupServers.map((server) => renderPptLogicalServer(server, data)).join("")}
               </div>
@@ -3982,7 +3982,7 @@ function renderPptNetworkPlan(data) {
     <div class="ppt-network-board" style="--site-count:${data.azCount}">
       <div class="ppt-workload-row">
         <strong>业务系统</strong>
-        ${data.tenantPlans.slice(0, 6).map((tenant) => `<span>${tenant.name} · ${tenant.type}</span>`).join("")}
+        ${data.tenantPlans.slice(0, 6).map((tenant) => `<span>${escapeAttr(tenant.name)} · ${escapeAttr(tenant.type)}</span>`).join("")}
       </div>
       <div class="ppt-site-grid">${siteColumns}</div>
       <div class="ppt-link-band ${data.mode === "local1az" ? "single" : ""}">
@@ -4004,7 +4004,7 @@ function renderPptLogicalServer(server, data) {
     const nonDnRoles = roles.filter((role) => !isDnRole(role));
     return `
       <div class="ppt-tenant-boundary tenant-${tenantIndex % 4}">
-        <b>${tenant.name}</b>
+        <b>${escapeAttr(tenant.name)}</b>
         ${nonDnRoles.length ? `<div>${nonDnRoles.slice(0, 6).map(renderPptRolePill).join("")}${nonDnRoles.length > 6 ? `<span class="role-more">+${nonDnRoles.length - 6}</span>` : ""}</div>` : ""}
         ${renderTenantDnPlacement(dnPlacements)}
       </div>
@@ -4020,7 +4020,7 @@ function renderPptLogicalServer(server, data) {
 
   return `
     <article class="ppt-logical-server ${server.roles.length ? "" : "reserve"}">
-      <div class="ppt-server-head"><strong>${server.id}</strong><span>${server.tenantPoolLabel || "现有集群共享服务器"} · ${server.rack || server.az}</span></div>
+      <div class="ppt-server-head"><strong>${escapeAttr(server.id)}</strong><span>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")} · ${escapeAttr(server.rack || server.az)}</span></div>
       ${tenantGroups}${systemGroup || (!tenantGroups ? `<p>故障接管 / 扩容预留</p>` : "")}
     </article>
   `;
@@ -4029,9 +4029,9 @@ function renderPptLogicalServer(server, data) {
 function renderPptRolePill(role) {
   const type = isCnRole(role) ? "cn" : isDnRole(role) ? "dn" : isGtmRole(role) ? "gtm" : "management";
   const label = role
-    .replace("-Master", "-M")
+    .replace(/-Master$/, "-M")
     .replace(/-Slave(\d*)$/, (_, no) => `-S${no || "1"}`);
-  return `<span class="ppt-role-pill ${type}" title="${role}">${label}</span>`;
+  return `<span class="ppt-role-pill ${type}" title="${escapeAttr(role)}">${escapeAttr(label)}</span>`;
 }
 
 function renderPptServerTopology(data) {
@@ -4072,13 +4072,13 @@ function renderPhysicalServer(server, data) {
     <article class="physical-server ${server.roles.length ? "" : "reserve"}">
       <div class="server-chassis" aria-hidden="true"><i></i><i></i><i></i></div>
       <div class="physical-server-info">
-        <div><strong>${server.id}</strong><span>${server.tenantPoolLabel || "现有集群共享服务器"} / ${server.hostGroup || "通用资源池"}</span></div>
-        <p>${summarizeServerRoles(server.roles)}</p>
+        <div><strong>${escapeAttr(server.id)}</strong><span>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")} / ${escapeAttr(server.hostGroup || "通用资源池")}</span></div>
+        <p>${escapeAttr(summarizeServerRoles(server.roles))}</p>
         ${renderServerCnTenantMap(server.roles)}
         ${renderServerDnGroupMap(server.roles)}
         ${renderServerGtmGroupMap(server.roles)}
-        <small>${renderServerRoleDetail(server.roles)}</small>
-        <em>${specText}</em>
+        <small>${escapeAttr(renderServerRoleDetail(server.roles))}</small>
+        <em>${escapeAttr(specText)}</em>
       </div>
     </article>
   `;
@@ -4195,7 +4195,7 @@ function renderBusinessSite(site, data) {
   const mgrText = site.disaster ? "管理备" : "管理节点";
   const tenantBrief = data.tenantPlans
     .slice(0, 3)
-    .map((tenant) => `<span>${tenant.name}: CN ${tenant.cnPerAz}/AZ · DN ${tenant.shardCount}G×${tenant.replicasPerShard}</span>`)
+    .map((tenant) => `<span>${escapeAttr(tenant.name)}: CN ${tenant.cnPerAz}/AZ · DN ${tenant.shardCount}G×${tenant.replicasPerShard}</span>`)
     .join("");
 
   return `
@@ -4218,8 +4218,8 @@ function renderBusinessHaMatrix(data) {
     .map((tenant) => `
       <article class="business-ha-tenant">
         <div>
-          <strong>${tenant.name}</strong>
-          <span>${tenant.type}</span>
+          <strong>${escapeAttr(tenant.name)}</strong>
+          <span>${escapeAttr(tenant.type)}</span>
         </div>
         <p>CN：${tenant.cnPerAz}/AZ，单 CN 推荐 ${tenant.cnSpecLabel || `${tenant.cnCores}C/${tenant.cnMemoryGb}GB`}；DN：${tenant.shardCount} Group，单 DN 推荐 ${tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`}。</p>
         <small>GTM：${tenant.gtmGroupText}；管理节点：${data.managementNodes} 个实例管控租户拓扑、监控、切换。</small>
@@ -4245,8 +4245,8 @@ function renderReverseTopology(data) {
     .slice(0, 8)
     .map((tenant) => `
       <article class="reverse-tenant-map-card">
-        <strong>${tenant.name}</strong>
-        <span>${tenant.type}</span>
+        <strong>${escapeAttr(tenant.name)}</strong>
+        <span>${escapeAttr(tenant.type)}</span>
         <small>CN ${tenant.cnPerAz}/AZ · DN ${tenant.shardCount} Group × ${tenant.replicasPerShard} 副本 = ${tenant.dnInstances} 实例</small>
         <small>${tenant.gtmGroupText}</small>
       </article>
@@ -4331,8 +4331,8 @@ function renderTopologyServerTiles(servers) {
           <strong>${server.id}</strong>
           <span>${server.az}</span>
         </div>
-        <p>${roleGroups}</p>
-        <small class="reverse-server-detail">${renderServerRoleDetail(server.roles)}</small>
+        <p>${escapeAttr(roleGroups)}</p>
+        <small class="reverse-server-detail">${escapeAttr(renderServerRoleDetail(server.roles))}</small>
         <small>CPU ${server.cpuLoad}% · 磁盘 ${server.diskLoad}% · ${server.roles.length ? `${server.roles.length} 组件实例` : "预留节点"}</small>
       </article>
     `;
@@ -4367,26 +4367,26 @@ function renderTenantComponentChain(tenant, serverPlan) {
   return `
     <article class="tenant-chain-card">
       <div class="tenant-chain-root">
-        <strong>${tenant.name}</strong>
-        <small>${tenant.type}</small>
+        <strong>${escapeAttr(tenant.name)}</strong>
+        <small>${escapeAttr(tenant.type)}</small>
       </div>
       <div class="tenant-chain-arrow">应用连接</div>
       <div class="tenant-chain-group cn">
         <b>CN 计算入口</b>
-        <div>${cnNodes.map((node) => `<span>${node}</span>`).join("")}</div>
-        <small class="tenant-chain-server-map">${cnServerText}</small>
+        <div>${cnNodes.map((node) => `<span>${escapeAttr(node)}</span>`).join("")}</div>
+        <small class="tenant-chain-server-map">${escapeAttr(cnServerText)}</small>
       </div>
       <div class="tenant-chain-arrow">路由访问</div>
       <div class="tenant-chain-group dn">
         <b>DN 分片与副本</b>
-        <div>${dnNodes.map((node) => `<span>${node}</span>`).join("")}${hiddenDn}</div>
-        <small class="tenant-chain-server-map">${dnServerText}</small>
+        <div>${dnNodes.map((node) => `<span>${escapeAttr(node)}</span>`).join("")}${hiddenDn}</div>
+        <small class="tenant-chain-server-map">${escapeAttr(dnServerText)}</small>
       </div>
       <div class="tenant-chain-arrow">全局事务</div>
       <div class="tenant-chain-group gtm">
         <b>GTM 绑定</b>
-        <div>${gtmNodes.map((node) => `<span>${node}</span>`).join("")}<small>${tenant.gtmGroupText}</small></div>
-        <small class="tenant-chain-server-map">${gtmServerText}</small>
+        <div>${gtmNodes.map((node) => `<span>${escapeAttr(node)}</span>`).join("")}<small>${escapeAttr(tenant.gtmGroupText)}</small></div>
+        <small class="tenant-chain-server-map">${escapeAttr(gtmServerText)}</small>
       </div>
     </article>
   `;
@@ -4444,8 +4444,8 @@ function summarizeServerRoles(roles) {
   const cn = roles.filter(isCnRole).length;
   const gtm = roles.filter(isGtmRole).length;
   const mgr = roles.filter((role) => role === "管理节点").length;
-  const dnMaster = roles.filter((role) => isDnRole(role) && role.includes("Master")).length;
-  const dnSlave = roles.filter((role) => isDnRole(role) && role.includes("Slave")).length;
+  const dnMaster = roles.filter((role) => isDnRole(role) && /-Master$/.test(role)).length;
+  const dnSlave = roles.filter((role) => isDnRole(role) && /-Slave\d*$/.test(role)).length;
   const parts = [];
   if (cn) parts.push(`CN×${cn}`);
   if (dnMaster) parts.push(`DN-M×${dnMaster}`);
@@ -4468,7 +4468,7 @@ function renderServerDnGroupMap(roles) {
         const groups = [...new Set(placements.map((item) => item.group))];
         return `<span class="${groups.length > 1 ? "is-colocated" : ""}">${placements
           .sort((a, b) => a.group - b.group || a.role.localeCompare(b.role))
-          .map((item) => `${tenant}-DN-G${item.group}-${item.role}`)
+          .map((item) => `${escapeAttr(tenant)}-DN-G${item.group}-${escapeAttr(item.role)}`)
           .join(" + ")}${groups.length > 1 ? " · 多Group共宿" : ""}</span>`;
       }).join("")}
     </div>
@@ -4478,13 +4478,13 @@ function renderServerDnGroupMap(roles) {
 function renderServerCnTenantMap(roles) {
   const tenants = [...new Set(roles.map(parseCnTenant).filter(Boolean))];
   if (!tenants.length) return "";
-  return `<div class="physical-cn-tenant-map ${tenants.length > 1 ? "is-shared" : ""}"><b>CN 租户</b><span>${tenants.join(" + ")}${tenants.length > 1 ? " · 跨租户共宿" : " · 独立"}</span></div>`;
+  return `<div class="physical-cn-tenant-map ${tenants.length > 1 ? "is-shared" : ""}"><b>CN 租户</b><span>${escapeAttr(tenants.join(" + "))}${tenants.length > 1 ? " · 跨租户共宿" : " · 独立"}</span></div>`;
 }
 
 function renderServerGtmGroupMap(roles) {
   const groups = [...new Set(roles.map(getGtmRoleGroupKey).filter(Boolean))];
   if (groups.length < 2) return "";
-  return `<div class="physical-gtm-group-map"><b>GTM Group</b><span>${groups.join(" + ")} · 跨组共宿</span></div>`;
+  return `<div class="physical-gtm-group-map"><b>GTM Group</b><span>${escapeAttr(groups.join(" + "))} · 跨组共宿</span></div>`;
 }
 
 function renderServerRoleDetail(roles) {
@@ -4571,7 +4571,7 @@ function renderServerBoard(data) {
         ${data.serverPlan.map((server) => `
           <article class="server-tile">
             <div><strong>${server.id}</strong><span>${server.az}</span></div>
-            <p>${server.roles.length ? server.roles.join(" / ") : "预留资源"}</p>
+            <p>${escapeAttr(server.roles.length ? server.roles.join(" / ") : "预留资源")}</p>
             <small>CPU ${server.cpuLoad}% · 磁盘 ${server.diskLoad}%</small>
           </article>
         `).join("")}
@@ -4606,8 +4606,8 @@ function renderTenantCard(tenant) {
   return `
     <article class="tenant-card">
       <div class="tenant-title">
-        <strong>${tenant.name}</strong>
-        <span>${tenant.type}</span>
+        <strong>${escapeAttr(tenant.name)}</strong>
+        <span>${escapeAttr(tenant.type)}</span>
       </div>
       <div class="tenant-resource-grid">
         <div class="tenant-resource cn"><b>CN</b><span>${tenant.cnPerAz}/生产AZ · ${tenant.totalCn} 总实例${tenant.cnManual ? " · 手工" : ""}</span></div>
@@ -4820,7 +4820,7 @@ const excelStyles = Object.freeze({
 
 function formatExcelRole(role) {
   return role
-    .replace("-Master", "-M")
+    .replace(/-Master$/, "-M")
     .replace(/-Slave(\d*)$/, (_, no) => `-S${no || "1"}`);
 }
 
