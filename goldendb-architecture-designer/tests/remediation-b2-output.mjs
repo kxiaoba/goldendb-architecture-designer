@@ -2,10 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { normalizeTenantIdentity } from './normalize-tenant-identity.mjs';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const archive = path.join(path.dirname(project), 'outputs/goldendb-remediation-20260906/b2');
-const out = path.join(archive, 'evidence');
+const out = process.env.REMEDIATION_TEST_OUTPUT || path.join(archive, 'evidence');
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs');
 fs.mkdirSync(out, { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -38,8 +39,8 @@ try {
     for (const environment of ['poc', 'production']) {
       for (const mode of ['local1az', 'local2az', 'twoSiteThreeDc', 'threeSiteFiveDc']) {
         for (const count of [2, 4]) {
-          const before = await setup(path.join(archive, 'baseline/goldendb-architecture-designer'), module, environment, mode, count);
-          const after = await setup(project, module, environment, mode, count);
+          const before = normalizeTenantIdentity(await setup(path.join(archive, 'baseline/goldendb-architecture-designer'), module, environment, mode, count));
+          const after = normalizeTenantIdentity(await setup(project, module, environment, mode, count));
           results.push({ id: `${module}-${environment}-${mode}-${count}`, pass: before === after, beforeHash: hash(before), afterHash: hash(after) });
         }
       }

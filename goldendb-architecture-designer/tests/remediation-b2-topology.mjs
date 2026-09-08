@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const out = path.join(path.dirname(project), 'outputs/goldendb-remediation-20260906/b2b/evidence');
+const out = process.env.REMEDIATION_TEST_OUTPUT || path.join(path.dirname(project), 'outputs/goldendb-remediation-20260906/b2b/evidence');
 fs.mkdirSync(out, { recursive: true });
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs');
 const browser = await chromium.launch({ channel: 'chrome', headless: true });

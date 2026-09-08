@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { normalizeTenantIdentity } from './normalize-tenant-identity.mjs';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = path.dirname(project);
@@ -72,12 +73,13 @@ try {
   await load(path.join(originalEvidence, 'baseline/goldendb-architecture-designer'));
   for (const fixture of fixtures) {
     await setup(fixture.parameters, fixture.tenants);
-    baseline[fixture.id] = await page.evaluate(() => JSON.stringify(latestDesignData));
+    baseline[fixture.id] = normalizeTenantIdentity(await page.evaluate(() => JSON.stringify(latestDesignData)));
   }
   await load(project);
   for (const fixture of fixtures) await test(`REG-${fixture.id}`, '合法场景完整模型与修改前一致', async () => {
     await setup(fixture.parameters, fixture.tenants);
-    const actual = await page.evaluate(() => JSON.stringify(latestDesignData));
+    const actual = normalizeTenantIdentity(await page.evaluate(() => JSON.stringify(latestDesignData)));
+    if (actual !== baseline[fixture.id]) save(`diff-${fixture.id}.json`, { before: JSON.parse(baseline[fixture.id]), after: JSON.parse(actual) });
     const digest = value => createHash('sha256').update(value).digest('hex');
     return { pass: actual === baseline[fixture.id], beforeHash: digest(baseline[fixture.id]), afterHash: digest(actual) };
   });

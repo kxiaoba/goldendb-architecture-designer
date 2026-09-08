@@ -3,8 +3,9 @@ from pathlib import Path
 import json
 import zipfile
 import openpyxl
+import os
 
-directory = Path(__file__).resolve().parents[2] / 'outputs/goldendb-remediation-20260906/b2b/evidence'
+directory = Path(os.environ['REMEDIATION_TEST_OUTPUT']) if os.environ.get('REMEDIATION_TEST_OUTPUT') else Path(__file__).resolve().parents[2] / 'outputs/goldendb-remediation-20260906/b2b/evidence'
 results = []
 for module in ['business', 'reverse']:
     expected = json.loads((directory / f'{module}-sheets.json').read_text())

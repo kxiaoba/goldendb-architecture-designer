@@ -245,6 +245,7 @@ const defaultReverseTenants = [
   { name: "租户2", type: "distributed", deploymentStrategy: "dedicated", cnPerAz: 2, shardCount: 2, replicaCount: 4, cnCores: 8, cnMemoryGb: 16, dnCores: 16, dnMemoryGb: 64 }
 ];
 
+let nextTenantIdentity = 1;
 let businessTenantSpecs = cloneTenantSpecs(defaultBusinessTenants);
 let reverseTenantSpecs = cloneTenantSpecs(defaultReverseTenants);
 let latestDesignData = null;
@@ -278,6 +279,12 @@ function getPlanningInputIssues(module = $("designModule").value) {
     if (error) issues.push(error);
   });
   const specs = module === "reverse" ? reverseTenantSpecs : businessTenantSpecs;
+  try {
+    ensureTenantIdentities(specs);
+  } catch (error) {
+    if (!(error instanceof PlanningInputError)) throw error;
+    issues.push(error.message);
+  }
   if (!specs.length || specs.length > planningLimits.tenants) issues.push(`本地规划支持 1 至 ${planningLimits.tenants} 个租户（浏览器规模保护，非产品限制）`);
   specs.forEach((tenant, index) => {
     const rules = module === "reverse"
@@ -340,7 +347,49 @@ function getCurrentPlanForAction() {
 }
 
 function cloneTenantSpecs(specs) {
-  return specs.map((item) => ({ ...item }));
+  const cloned = specs.map((item) => ({ ...item }));
+  ensureTenantIdentities(cloned);
+  return cloned;
+}
+
+function createTenantIdentity() {
+  return `TID${nextTenantIdentity++}`;
+}
+
+function ensureTenantIdentities(specs) {
+  const seen = new Set();
+  specs.forEach((spec) => {
+    if (!spec.tenantId) return;
+    const ordinal = Number(String(spec.tenantId).slice(3));
+    if (!/^TID[1-9]\d*$/.test(spec.tenantId) || !Number.isSafeInteger(ordinal + 1) || seen.has(spec.tenantId)) {
+      throw new PlanningInputError("租户内部标识无效或重复，请重新创建该租户。");
+    }
+    seen.add(spec.tenantId);
+    nextTenantIdentity = Math.max(nextTenantIdentity, ordinal + 1);
+  });
+  specs.forEach((spec) => {
+    if (!spec.tenantId) spec.tenantId = createTenantIdentity();
+  });
+}
+
+function getTenantKey(tenant) {
+  return tenant.tenantId || tenant.name;
+}
+
+function displayTenantKey(key, tenants = latestDesignData?.tenantPlans || []) {
+  const tenant = tenants.find((item) => getTenantKey(item) === key);
+  if (!tenant) return key;
+  return tenants.filter((item) => item.name === tenant.name).length > 1
+    ? `${tenant.name} [${tenant.tenantId}]` : tenant.name;
+}
+
+function displayRole(role, tenants = latestDesignData?.tenantPlans || []) {
+  const match = /^(TID\d+)(-(?:CN\d+|DN-G\d+(?:-(?:Master|Slave\d*|M|S\d*))?|GTM\d*))$/.exec(role);
+  return match ? `${displayTenantKey(match[1], tenants)}${match[2]}` : role;
+}
+
+function displayRoles(roles, tenants = latestDesignData?.tenantPlans || []) {
+  return roles.map((role) => displayRole(role, tenants));
 }
 
 const tenantDeploymentStrategyLabels = {
@@ -349,17 +398,17 @@ const tenantDeploymentStrategyLabels = {
 };
 
 function getTenantDeploymentStrategy(spec, index) {
-  if (index === 0) return "shared";
+  if (!spec.deploymentStrategy && index === 0) return "shared";
   return spec.deploymentStrategy === "shared" ? "shared" : "dedicated";
 }
 
 function getTenantResourcePoolKey(tenant) {
-  return tenant.deploymentStrategy === "dedicated" ? `tenant-${tenant.tenantNo}` : "shared";
+  return tenant.deploymentStrategy === "dedicated" ? `tenant-${getTenantKey(tenant)}` : "shared";
 }
 
-function getTenantResourcePoolLabel(tenant) {
+function getTenantResourcePoolLabel(tenant, tenants = [tenant]) {
   return tenant.deploymentStrategy === "dedicated"
-    ? `${tenant.name}新增独立服务器`
+    ? `${displayTenantKey(getTenantKey(tenant), tenants)}新增独立服务器`
     : "现有集群共享服务器";
 }
 
@@ -1132,7 +1181,7 @@ function buildTenantResourcePools(config) {
       const key = getTenantResourcePoolKey(tenant);
       pools.push({
         key,
-        label: getTenantResourcePoolLabel(tenant),
+        label: getTenantResourcePoolLabel(tenant, config.tenantPlans),
         tenantPlans: [tenant],
         managementNodes: 0,
         gtmPlacements: gtmPlacements.filter((placement) => placement.resourcePoolKey === key)
@@ -1823,7 +1872,7 @@ function getRoleResourceDemand(role, tenantPlans) {
   const cnTenant = parseCnTenant(role);
   const dnRole = parseDnPlacementRole(role);
   const tenantName = cnTenant || dnRole?.tenant;
-  const tenant = tenantPlans.find((item) => item.name === tenantName);
+  const tenant = tenantPlans.find((item) => getTenantKey(item) === tenantName);
   if (cnTenant && tenant) return { cpu: tenant.cnCores, memory: tenant.cnMemoryGb, disk: 0 };
   if (dnRole && tenant) return {
     cpu: tenant.dnCores,
@@ -1878,24 +1927,24 @@ function placeTenantCnRolesByPool(servers, config) {
       const comparePlacement = (a, b) => {
         const aTenants = getServerCnTenants(a);
         const bTenants = getServerCnTenants(b);
-        const sameTenantDelta = a.roles.filter((role) => parseCnTenant(role) === tenant.name).length
-          - b.roles.filter((role) => parseCnTenant(role) === tenant.name).length;
+        const sameTenantDelta = a.roles.filter((role) => parseCnTenant(role) === getTenantKey(tenant)).length
+          - b.roles.filter((role) => parseCnTenant(role) === getTenantKey(tenant)).length;
         if (config.cnTenantPlacement === "isolated") {
-          const existingTenantDelta = Number(!aTenants.includes(tenant.name)) - Number(!bTenants.includes(tenant.name));
+          const existingTenantDelta = Number(!aTenants.includes(getTenantKey(tenant))) - Number(!bTenants.includes(getTenantKey(tenant)));
           return existingTenantDelta || sameTenantDelta || a.cnCount - b.cnCount || a.roles.length - b.roles.length || a.id.localeCompare(b.id);
         }
         const tenantVarietyDelta = aTenants.length - bTenants.length;
         return sameTenantDelta || a.cnCount - b.cnCount || tenantVarietyDelta || a.roles.length - b.roles.length || a.id.localeCompare(b.id);
       };
-      const roleName = `${tenant.name}-CN${roleIndex}`;
+      const roleName = `${getTenantKey(tenant)}-CN${roleIndex}`;
       const capacityCandidates = candidates
         .filter((server) => server.cnCount < config.maxCnPerServer && canPlaceRoleWithinWatermark(server, roleName, config));
       const antiAffinityCandidates = capacityCandidates
         .filter((server) => config.environment !== "production"
-          || !server.roles.some((role) => parseCnTenant(role) === tenant.name));
+          || !server.roles.some((role) => parseCnTenant(role) === getTenantKey(tenant)));
       const policyCandidates = antiAffinityCandidates
         .filter((server) => config.cnTenantPlacement === "shared"
-          || getServerCnTenants(server).every((name) => name === tenant.name))
+          || getServerCnTenants(server).every((name) => name === getTenantKey(tenant)))
         .sort(comparePlacement);
       const target = config.environment === "production"
         ? policyCandidates[0]
@@ -1937,8 +1986,8 @@ function getCnPlacementAudit(serverPlan, tenantPlans, azCount) {
       ? tenant.cnByAz.reduce((sum, count) => sum + count, 0)
       : tenant.cnPerAz * azCount;
     const actual = serverPlan.reduce((sum, server) =>
-      sum + server.roles.filter((role) => parseCnTenant(role) === tenant.name).length, 0);
-    return { tenant: tenant.name, requested, actual, complete: actual === requested };
+      sum + server.roles.filter((role) => parseCnTenant(role) === getTenantKey(tenant)).length, 0);
+    return { tenant: getTenantKey(tenant), requested, actual, complete: actual === requested };
   });
   return {
     requested: tenants.reduce((sum, tenant) => sum + tenant.requested, 0),
@@ -1956,15 +2005,15 @@ function placeDnRolesByPool(servers, config) {
         const azIndex = (group + replica - 2) % config.azCount;
         const tenantPool = getTenantResourcePoolKey(tenant);
         const candidates = servers.filter((server) => server.componentKeys.includes("dn") && server.tenantPool === tenantPool);
-        const withoutSameGroup = candidates.filter((server) => !hasDnGroupRole(server, tenant.name, group));
+        const withoutSameGroup = candidates.filter((server) => !hasDnGroupRole(server, getTenantKey(tenant), group));
         const comparePlacement = (a, b) => {
           const azDelta = Number(b.azIndex === azIndex) - Number(a.azIndex === azIndex);
           if (azDelta) return azDelta;
-          const aTenantDn = countTenantDnRoles(a, tenant.name);
-          const bTenantDn = countTenantDnRoles(b, tenant.name);
+          const aTenantDn = countTenantDnRoles(a, getTenantKey(tenant));
+          const bTenantDn = countTenantDnRoles(b, getTenantKey(tenant));
           if (config.dnTenantPlacement === "shared") {
-            const aCrossTenant = getServerDnTenants(a).some((name) => name !== tenant.name);
-            const bCrossTenant = getServerDnTenants(b).some((name) => name !== tenant.name);
+            const aCrossTenant = getServerDnTenants(a).some((name) => name !== getTenantKey(tenant));
+            const bCrossTenant = getServerDnTenants(b).some((name) => name !== getTenantKey(tenant));
             const crossTenantDelta = Number(bCrossTenant) - Number(aCrossTenant);
             if (crossTenantDelta) return crossTenantDelta;
           }
@@ -1978,14 +2027,14 @@ function placeDnRolesByPool(servers, config) {
           }
           return a.dnCount - b.dnCount || a.roles.length - b.roles.length;
         };
-        const roleName = `${tenant.name}-DN-G${group}-${role}`;
+        const roleName = `${getTenantKey(tenant)}-DN-G${group}-${role}`;
         const eligible = withoutSameGroup
           .filter((server) =>
             server.dnCount < config.maxDnPerServer &&
-            countTenantDnRoles(server, tenant.name) < config.maxTenantDnPerServer &&
+            countTenantDnRoles(server, getTenantKey(tenant)) < config.maxTenantDnPerServer &&
             canPlaceRoleWithinWatermark(server, roleName, config) &&
             (config.dnTenantPlacement === "shared"
-              || getServerDnTenants(server).every((name) => name === tenant.name))
+              || getServerDnTenants(server).every((name) => name === getTenantKey(tenant)))
           )
           .sort(comparePlacement);
         const capacityFallback = withoutSameGroup
@@ -2029,7 +2078,7 @@ function getControlPlanePlacementAudit(serverPlan, managementNodes, gtmNodes) {
 }
 
 function getTenantResourcePoolAudit(serverPlan, tenantPlans) {
-  const tenantByName = new Map(tenantPlans.map((tenant) => [tenant.name, tenant]));
+  const tenantByName = new Map(tenantPlans.map((tenant) => [getTenantKey(tenant), tenant]));
   const violations = [];
   serverPlan.forEach((server) => {
     server.roles.forEach((role) => {
@@ -2049,7 +2098,7 @@ function getTenantResourcePoolAudit(serverPlan, tenantPlans) {
     dedicatedPools: tenantPlans
       .filter((tenant) => tenant.deploymentStrategy === "dedicated")
       .map((tenant) => ({
-        tenant: tenant.name,
+        tenant: getTenantKey(tenant),
         poolKey: getTenantResourcePoolKey(tenant),
         servers: serverPlan.filter((server) => server.tenantPool === getTenantResourcePoolKey(tenant)).length
       }))
@@ -2151,12 +2200,12 @@ function getGtmRolePlacements(config) {
   for (let groupIndex = 0; groupIndex < groupCount; groupIndex += 1) {
     const replicas = baseCount + (groupIndex < remainder ? 1 : 0);
     const tenant = distributedTenants[groupIndex];
-    const groupKey = binding.kind === "dedicated" && tenant ? `${tenant.name}-GTM` : "GTM-SYS";
+    const groupKey = binding.kind === "dedicated" && tenant ? `${getTenantKey(tenant)}-GTM` : "GTM-SYS";
     for (let replica = 1; replica <= replicas; replica += 1) {
       placements.push({
         groupKey,
-        label: groupKey === "GTM-SYS" ? `GTM-SYS${replica}` : `${tenant.name}-GTM${replica}`,
-        tenantName: binding.kind === "dedicated" && tenant ? tenant.name : null,
+        label: groupKey === "GTM-SYS" ? `GTM-SYS${replica}` : `${getTenantKey(tenant)}-GTM${replica}`,
+        tenantName: binding.kind === "dedicated" && tenant ? getTenantKey(tenant) : null,
         resourcePoolKey: binding.kind === "dedicated" && tenant
           ? getTenantResourcePoolKey(tenant)
           : "shared",
@@ -2333,7 +2382,7 @@ function placeTenantCnRoles(servers, config) {
         .sort((a, b) => a.cnCount - b.cnCount || a.roles.length - b.roles.length);
       const target = candidates.find((server) => server.cnCount < config.maxCnPerServer) || candidates[0] || servers[0];
       if (!target) return;
-      target.roles.push(`${tenant.name}-CN${i + 1}`);
+      target.roles.push(`${getTenantKey(tenant)}-CN${i + 1}`);
       target.cnCount += 1;
     }
   });
@@ -2359,7 +2408,7 @@ function getNextGtmRoleLabel(config, index) {
   const distributedTenants = (config.tenantPlans || []).filter((tenant) => tenant.isDistributed);
   if (!distributedTenants.length) return `GTM${index + 1}`;
   if (distributedTenants.length > 1) return `GTM-SYS${index + 1}`;
-  return `${distributedTenants[0].name}-GTM${index + 1}`;
+  return `${getTenantKey(distributedTenants[0])}-GTM${index + 1}`;
 }
 
 function getAzNames(mode, azCount) {
@@ -2395,7 +2444,7 @@ function placeDnRoles(servers, config) {
     for (let group = 1; group <= tenant.shardCount; group += 1) {
       for (let replica = 1; replica <= tenant.replicasPerShard; replica += 1) {
         const role = replica === 1 ? "Master" : "Slave";
-        const label = `${tenant.name}-DN-G${group}-${role}`;
+        const label = `${getTenantKey(tenant)}-DN-G${group}-${role}`;
         const azOffset = (group + replica - 2) % config.azCount;
         const candidates = servers
           .filter((server, index) => index % config.azCount === azOffset)
@@ -2516,6 +2565,7 @@ function getBusinessGtmNodes(shape, mode, binding, environment) {
 }
 
 function buildBusinessTenantPlans(data) {
+  ensureTenantIdentities(data.specs);
   ["sqlPerTxn", "cnSingleNodeTps", "growthPower", "maxShardTb", "safeShardTps"].forEach((key) => {
     const error = numericInputError(data[key], key, { min: Number.MIN_VALUE });
     if (error) throw new PlanningInputError(error);
@@ -2567,6 +2617,7 @@ function buildBusinessTenantPlans(data) {
 
     return {
       tenantNo,
+      tenantId: spec.tenantId,
       name: normalizeTenantName(spec.name, tenantNo),
       deploymentStrategy,
       deploymentStrategyLabel: tenantDeploymentStrategyLabels[deploymentStrategy],
@@ -2621,6 +2672,7 @@ function buildBusinessTenantPlans(data) {
 }
 
 function buildReverseTenantPlans(data) {
+  ensureTenantIdentities(data.specs);
   const plans = data.specs.map((spec, index) => {
     const tenantNo = index + 1;
     const deploymentStrategy = getTenantDeploymentStrategy(spec, index);
@@ -2642,6 +2694,7 @@ function buildReverseTenantPlans(data) {
 
     return {
       tenantNo,
+      tenantId: spec.tenantId,
       name: normalizeTenantName(spec.name, tenantNo),
       deploymentStrategy,
       deploymentStrategyLabel: tenantDeploymentStrategyLabels[deploymentStrategy],
@@ -2744,8 +2797,8 @@ function applyGtmLabels(tenantPlans, binding, totalGtmNodes = 0) {
     ? Math.max(1, Math.ceil(totalGtmNodes / binding.groupCount))
     : 0;
   tenantPlans.forEach((tenant) => {
-    tenant.gtmLabel = getTenantGtmLabel(tenant.tenantNo, tenant.isDistributed, binding);
-    tenant.gtmGroupText = getTenantGtmGroupText(tenant.tenantNo, tenant.isDistributed, binding, perGroupReplicas);
+    tenant.gtmLabel = getTenantGtmLabel(getTenantKey(tenant), tenant.isDistributed, binding);
+    tenant.gtmGroupText = getTenantGtmGroupText(getTenantKey(tenant), tenant.isDistributed, binding, perGroupReplicas);
   });
 }
 
@@ -2941,12 +2994,12 @@ function renderBusinessTenantEditor() {
         <input class="tenant-input" data-mode="business" data-index="${index}" data-key="name" value="${escapeAttr(tenant.name)}">
       </label>
       <label class="field compact-field tenant-deployment-field">
-        <span>${index === 0 ? "基础租户服务器策略" : "新增租户服务器策略"}</span>
-        <select class="tenant-input" data-mode="business" data-index="${index}" data-key="deploymentStrategy" ${index === 0 ? "disabled" : ""}>
-          <option value="shared" ${getTenantDeploymentStrategy(tenant, index) === "shared" ? "selected" : ""}>${index === 0 ? "现有集群基础资源池" : "复用现有服务器（允许按混部策略装箱）"}</option>
-          ${index === 0 ? "" : `<option value="dedicated" ${getTenantDeploymentStrategy(tenant, index) === "dedicated" ? "selected" : ""}>新增独立服务器（不与存量租户混部）</option>`}
+        <span>租户服务器策略</span>
+        <select class="tenant-input" data-mode="business" data-index="${index}" data-key="deploymentStrategy">
+          <option value="shared" ${getTenantDeploymentStrategy(tenant, index) === "shared" ? "selected" : ""}>复用现有服务器（允许按混部策略装箱）</option>
+          <option value="dedicated" ${getTenantDeploymentStrategy(tenant, index) === "dedicated" ? "selected" : ""}>新增独立服务器（不与存量租户混部）</option>
         </select>
-        <small>${index === 0 ? "作为现有集群资源基线。" : "独立模式为该租户建立物理服务器资源池；共享模式仍受水位、反亲和和组件混部规则约束。"}</small>
+        <small>独立模式使用专属物理服务器资源池；共享模式仍受水位、反亲和和组件混部规则约束。</small>
       </label>
       <div class="grid-two">
         <label class="field compact-field">
@@ -3006,12 +3059,12 @@ function renderReverseTenantEditor() {
         <input class="tenant-input" data-mode="reverse" data-index="${index}" data-key="name" value="${escapeAttr(tenant.name)}">
       </label>
       <label class="field compact-field tenant-deployment-field">
-        <span>${index === 0 ? "基础租户服务器策略" : "新增租户服务器策略"}</span>
-        <select class="tenant-input" data-mode="reverse" data-index="${index}" data-key="deploymentStrategy" ${index === 0 ? "disabled" : ""}>
-          <option value="shared" ${getTenantDeploymentStrategy(tenant, index) === "shared" ? "selected" : ""}>${index === 0 ? "现有集群基础资源池" : "复用现有服务器（允许按混部策略装箱）"}</option>
-          ${index === 0 ? "" : `<option value="dedicated" ${getTenantDeploymentStrategy(tenant, index) === "dedicated" ? "selected" : ""}>新增独立服务器（不与存量租户混部）</option>`}
+        <span>租户服务器策略</span>
+        <select class="tenant-input" data-mode="reverse" data-index="${index}" data-key="deploymentStrategy">
+          <option value="shared" ${getTenantDeploymentStrategy(tenant, index) === "shared" ? "selected" : ""}>复用现有服务器（允许按混部策略装箱）</option>
+          <option value="dedicated" ${getTenantDeploymentStrategy(tenant, index) === "dedicated" ? "selected" : ""}>新增独立服务器（不与存量租户混部）</option>
         </select>
-        <small>${index === 0 ? "作为现有集群资源基线。" : "资源反推时，独立模式仍计入客户服务器总量，并进行资源池容量红线检查。"}</small>
+        <small>独立模式仍计入客户服务器总量，并进行资源池容量红线检查。</small>
       </label>
       <div class="grid-two">
         <label class="field compact-field">
@@ -3163,10 +3216,10 @@ function renderNodePlan(data) {
     ["控制面核对", `管理实际落位 ${data.controlPlaneAudit.actualManagementNodes}/${data.controlPlaneAudit.requestedManagementNodes}；GTM 实际落位 ${data.controlPlaneAudit.actualGtmNodes}/${data.controlPlaneAudit.requestedGtmNodes}。`],
     ["资源结论", `${data.resourceState}：当前组合预计需要 ${data.requiredServerCount} 台，当前 ${data.serverCount} 台，可用口径约 ${data.usableServerCount} 台。`]
   ] : [
-    ["CN 计算节点", `按单租户、单 AZ 独立满足性能后汇总：${data.tenantPlans.map((tenant) => `${tenant.name} ${tenant.cnPerAz}/生产AZ${tenant.cnManual ? "（手工）" : "（自动）"}`).join("；")}；跨站点总计 ${data.totalCn} 个。${data.environment === "production" ? "同一租户按一机一 CN 反亲和部署。" : ""}`],
+    ["CN 计算节点", `按单租户、单 AZ 独立满足性能后汇总：${data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} ${tenant.cnPerAz}/生产AZ${tenant.cnManual ? "（手工）" : "（自动）"}`).join("；")}；跨站点总计 ${data.totalCn} 个。${data.environment === "production" ? "同一租户按一机一 CN 反亲和部署。" : ""}`],
     ["CN 租户部署", `${data.resourceReduction.cnTenantPlacementLabel}；${data.resourceReduction.configuredCnTenantPlacement === "auto" ? "由环境自动选择" : "用户手工指定"}。`],
-    ["DN 数据节点", `租户分片汇总 ${data.shardCount} 个 Group，副本实例合计 ${data.dnInstances} 个 DN；${data.tenantPlans.map((tenant) => `${tenant.name} 为 1 主 + ${Math.max(0, tenant.replicasPerShard - 1)} 从`).join("，")}。`],
-    ["DN 规格公式", data.tenantPlans.map((tenant) => `${tenant.name} ${tenant.dnSpecLabel}：${tenant.dnSpecFormula}`).join("；")],
+    ["DN 数据节点", `租户分片汇总 ${data.shardCount} 个 Group，副本实例合计 ${data.dnInstances} 个 DN；${data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 为 1 主 + ${Math.max(0, tenant.replicasPerShard - 1)} 从`).join("，")}。`],
+    ["DN 规格公式", data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} ${tenant.dnSpecLabel}：${tenant.dnSpecFormula}`).join("；")],
     ["DN 租户部署", `${data.resourceReduction.dnTenantPlacementLabel}；单机同租户上限 ${data.resourceReduction.maxTenantDnPerServer}，同一 Group 副本强制跨主机。`],
     ["GTM", data.shape === "distributed" ? `${data.gtmBinding.label}；${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 个 GTM 实例${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}。` : "集中式单分片事务通常不把 GTM 作为主路径。"],
     ["GTM 部署亲和", `${data.serverSizing.gtmAffinityLabel}；${data.serverSizing.componentLayoutNote}`],
@@ -3231,12 +3284,12 @@ function renderRisks(data) {
       risks.push(["risk-high", `管理节点仅 ${data.managementNodes} 个，低于当前环境建议的 ${data.recommendedManagementNodes} 个；请补足故障域覆盖或取得厂商方案确认。`]);
     }
     if (data.cnTenantIsolationViolations.length) {
-      risks.push(["risk-high", `CN 租户隔离未满足：${data.cnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("、")} 同时承载多个租户 CN；请增加 CN 服务器或改为跨租户混部策略。`]);
+      risks.push(["risk-high", `CN 租户隔离未满足：${data.cnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.map((key) => displayTenantKey(key, data.tenantPlans)).join("+")}]`).join("、")} 同时承载多个租户 CN；请增加 CN 服务器或改为跨租户混部策略。`]);
     } else if (data.environment === "production" && data.resourceReduction.allowCnTenantColocation) {
       risks.push(["risk-mid", "生产环境选择了跨租户 CN 混部，必须使用容器/cgroup 等机制设置 CPU、内存资源边界，并验证单机故障时多个租户的接管余量。"]);
     }
     if (data.environment === "production" && data.cnSameTenantHostViolations.length) {
-      risks.push(["risk-high", `生产同租户 CN 反亲和未满足：${data.cnSameTenantHostViolations.map((item) => `${item.serverId}[${item.tenant}×${item.count}]`).join("、")}；每台物理服务器只能承载该租户 1 个 CN。`]);
+      risks.push(["risk-high", `生产同租户 CN 反亲和未满足：${data.cnSameTenantHostViolations.map((item) => `${item.serverId}[${displayTenantKey(item.tenant, data.tenantPlans)}×${item.count}]`).join("、")}；每台物理服务器只能承载该租户 1 个 CN。`]);
     } else if (data.environment === "production") {
       risks.push(["risk-ok", "已校验当前已落位的生产 CN：同一租户按一机一实例分散部署。"]);
     }
@@ -3244,7 +3297,7 @@ function renderRisks(data) {
       risks.push(["risk-high", `CN 实际落位 ${data.cnPlacementAudit.actual}/${data.cnPlacementAudit.requested}，服务器不足时未突破同租户 CN 反亲和；请增加 CN 主机。`]);
     }
     if (data.dnTenantIsolationViolations.length) {
-      risks.push(["risk-high", `DN 租户隔离未满足：${data.dnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("、")} 同时承载多个租户 DN；请增加 DN 服务器或选择跨租户 DN 混部。`]);
+      risks.push(["risk-high", `DN 租户隔离未满足：${data.dnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.map((key) => displayTenantKey(key, data.tenantPlans)).join("+")}]`).join("、")} 同时承载多个租户 DN；请增加 DN 服务器或选择跨租户 DN 混部。`]);
     } else if (data.environment === "production" && data.resourceReduction.allowDnTenantColocation) {
       risks.push(["risk-mid", "生产环境选择了跨租户 DN 混部；必须设置 CPU、内存、IOPS 配额，并验证多租户峰值与单机故障接管余量。"]);
     }
@@ -3264,12 +3317,12 @@ function renderRisks(data) {
       risks.push(["risk-mid", "部分服务器 DN 密度较高，磁盘或 IO 可能成为瓶颈，建议降低单机 DN 上限或增加服务器。"]);
     }
     if (data.dnReplicaHostViolations.length) {
-      risks.push(["risk-high", `副本反亲和不满足：${data.dnReplicaHostViolations.map((item) => item.group).join("、")} 存在同一 Group 多副本同机，请增加服务器或降低其他组件占用。`]);
+      risks.push(["risk-high", `副本反亲和不满足：${data.dnReplicaHostViolations.map((item) => displayRole(item.group, data.tenantPlans)).join("、")} 存在同一 Group 多副本同机，请增加服务器或降低其他组件占用。`]);
     } else {
       risks.push(["risk-ok", "已校验同一 Group 的 Master/Slave 均分布在不同物理服务器。"]);
     }
     if (data.gtmReplicaHostViolations.length) {
-      risks.push(["risk-high", `GTM 反亲和不满足：${data.gtmReplicaHostViolations.map((item) => item.group).join("、")} 存在同组实例同机，请增加 GTM 可用主机。`]);
+      risks.push(["risk-high", `GTM 反亲和不满足：${data.gtmReplicaHostViolations.map((item) => displayRole(item.group, data.tenantPlans)).join("、")} 存在同组实例同机，请增加 GTM 可用主机。`]);
     } else {
       risks.push(["risk-ok", "已校验同一 GTM Group 的实例均跨物理服务器部署。"]);
     }
@@ -3303,16 +3356,16 @@ function renderRisks(data) {
   }
   data.tenantPlans.forEach((tenant) => {
     if (tenant.cnBelowMinimum) {
-      risks.push(["risk-high", `${tenant.name} 手工设置每生产 AZ ${tenant.cnPerAz} 个 CN，低于性能公式建议的 ${tenant.recommendedCnPerAz} 个；单 AZ 无法独立满足当前租户性能目标。`]);
+      risks.push(["risk-high", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 手工设置每生产 AZ ${tenant.cnPerAz} 个 CN，低于性能公式建议的 ${tenant.recommendedCnPerAz} 个；单 AZ 无法独立满足当前租户性能目标。`]);
     }
     if (tenant.shardBelowMinimum) {
-      risks.push(["risk-high", `${tenant.name} 手工设置 ${tenant.shardCount} 个 DN Group，低于容量/TPS 水位建议的 ${tenant.recommendedShardCount} 个；请增加 Group 或用同机型 POC 证明可承载。`]);
+      risks.push(["risk-high", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 手工设置 ${tenant.shardCount} 个 DN Group，低于容量/TPS 水位建议的 ${tenant.recommendedShardCount} 个；请增加 Group 或用同机型 POC 证明可承载。`]);
     }
     if (!tenant.isDistributed && (tenant.shardByCapacity > 1 || tenant.shardByTps > 1)) {
-      risks.push(["risk-mid", `${tenant.name} 当前为集中式/单分片，但容量口径需要 ${tenant.shardByCapacity} 分片、TPS 口径需要 ${tenant.shardByTps} 分片；建议评估改为分布式，或以单机 POC 证明集中式可承载。`]);
+      risks.push(["risk-mid", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 当前为集中式/单分片，但容量口径需要 ${tenant.shardByCapacity} 分片、TPS 口径需要 ${tenant.shardByTps} 分片；建议评估改为分布式，或以单机 POC 证明集中式可承载。`]);
     }
     if (tenant.replicasPerShard < tenant.recommendedReplicas) {
-      risks.push(["risk-mid", `${tenant.name} 手动设置 ${tenant.replicasPerShard} 副本（1 主 + ${Math.max(0, tenant.replicasPerShard - 1)} 从），低于当前环境建议的 ${tenant.recommendedReplicas} 副本；POC 可简化，生产需评估故障域、RPO/RTO 和多数派策略。`]);
+      risks.push(["risk-mid", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 手动设置 ${tenant.replicasPerShard} 副本（1 主 + ${Math.max(0, tenant.replicasPerShard - 1)} 从），低于当前环境建议的 ${tenant.recommendedReplicas} 副本；POC 可简化，生产需评估故障域、RPO/RTO 和多数派策略。`]);
     }
   });
   if (data.growthFactor === 1 && data.years > 1) {
@@ -3340,12 +3393,12 @@ function renderRisks(data) {
     risks.push(["risk-high", `管理节点指定为 ${data.managementNodes} 个，低于当前环境建议的 ${data.recommendedManagementNodes} 个；服务器数仍按输入计算，但高可用结论不通过。`]);
   }
   if (data.serverSizing.cnTenantIsolationViolations.length) {
-    risks.push(["risk-high", `CN 租户隔离未满足：${data.serverSizing.cnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("、")} 同时承载多个租户 CN；请增加 CN 服务器或改为跨租户混部策略。`]);
+    risks.push(["risk-high", `CN 租户隔离未满足：${data.serverSizing.cnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.map((key) => displayTenantKey(key, data.tenantPlans)).join("+")}]`).join("、")} 同时承载多个租户 CN；请增加 CN 服务器或改为跨租户混部策略。`]);
   } else if (data.environment === "production" && data.resourceReduction.allowCnTenantColocation) {
     risks.push(["risk-mid", "生产环境选择了跨租户 CN 混部。CN 仍归属各自租户，但共享物理故障域；需设置资源配额并完成多租户峰值叠加与故障接管压测。"]);
   }
   if (data.environment === "production" && data.serverSizing.cnSameTenantHostViolations.length) {
-    risks.push(["risk-high", `生产同租户 CN 反亲和未满足：${data.serverSizing.cnSameTenantHostViolations.map((item) => `${item.serverId}[${item.tenant}×${item.count}]`).join("、")}；每台物理服务器只能承载该租户 1 个 CN。`]);
+    risks.push(["risk-high", `生产同租户 CN 反亲和未满足：${data.serverSizing.cnSameTenantHostViolations.map((item) => `${item.serverId}[${displayTenantKey(item.tenant, data.tenantPlans)}×${item.count}]`).join("、")}；每台物理服务器只能承载该租户 1 个 CN。`]);
   } else if (data.environment === "production") {
     risks.push(["risk-ok", "已校验当前已落位的生产 CN：同一租户按一机一实例分散部署。"]);
   }
@@ -3353,7 +3406,7 @@ function renderRisks(data) {
     risks.push(["risk-high", `CN 实际落位 ${data.serverSizing.cnPlacementAudit.actual}/${data.serverSizing.cnPlacementAudit.requested}，服务器不足时未突破同租户 CN 反亲和；请增加 CN 主机。`]);
   }
   if (data.serverSizing.dnTenantIsolationViolations.length) {
-    risks.push(["risk-high", `DN 租户隔离未满足：${data.serverSizing.dnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("、")} 同时承载多个租户 DN；请增加 DN 服务器或选择跨租户 DN 混部。`]);
+    risks.push(["risk-high", `DN 租户隔离未满足：${data.serverSizing.dnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.map((key) => displayTenantKey(key, data.tenantPlans)).join("+")}]`).join("、")} 同时承载多个租户 DN；请增加 DN 服务器或选择跨租户 DN 混部。`]);
   } else if (data.environment === "production" && data.resourceReduction.allowDnTenantColocation) {
     risks.push(["risk-mid", "生产环境选择跨租户 DN 共宿。租户逻辑归属不变，但共享物理故障域；需设置资源配额并验证多租户峰值、IOPS 和故障接管余量。"]);
   }
@@ -3370,7 +3423,7 @@ function renderRisks(data) {
     risks.push(["risk-mid", `DN 台数由容量决定：副本落盘约 ${round(data.serverSizing.storedDataTb)}TB，高于实例密度口径。`]);
   }
   if (data.serverSizing.dnReplicaHostViolations.length) {
-    risks.push(["risk-high", `副本反亲和不满足：${data.serverSizing.dnReplicaHostViolations.map((item) => item.group).join("、")} 存在同一 Group 多副本同机，当前方案不可用于生产。`]);
+    risks.push(["risk-high", `副本反亲和不满足：${data.serverSizing.dnReplicaHostViolations.map((item) => displayRole(item.group, data.tenantPlans)).join("、")} 存在同一 Group 多副本同机，当前方案不可用于生产。`]);
   } else {
     risks.push(["risk-ok", "已校验同一 Group 的 Master/Slave 均跨物理服务器部署。"]);
   }
@@ -3380,7 +3433,7 @@ function renderRisks(data) {
     risks.push(["risk-ok", `逐台服务器 CPU、内存、磁盘均未超过扣除 ${round(data.serverSizing.reserveRatio * 100)}% 预留后的安全水位。`]);
   }
   if (data.serverSizing.gtmReplicaHostViolations.length) {
-    risks.push(["risk-high", `GTM 反亲和不满足：${data.serverSizing.gtmReplicaHostViolations.map((item) => item.group).join("、")} 存在同组实例同机，当前方案不可用于生产。`]);
+    risks.push(["risk-high", `GTM 反亲和不满足：${data.serverSizing.gtmReplicaHostViolations.map((item) => displayRole(item.group, data.tenantPlans)).join("、")} 存在同组实例同机，当前方案不可用于生产。`]);
   } else {
     risks.push(["risk-ok", "已校验同一 GTM Group 的实例均跨物理服务器部署。"]);
   }
@@ -3409,7 +3462,7 @@ function renderHaGuide(data) {
   const lowWater = getLowWater(data, teamCount);
   const highWater = teamCount;
   const tenantReplicaText = data.tenantPlans
-    .map((tenant) => `${tenant.name}：${tenant.replicasPerShard} 副本（1 Master + ${Math.max(0, tenant.replicasPerShard - 1)} Slave）`)
+    .map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)}：${tenant.replicasPerShard} 副本（1 Master + ${Math.max(0, tenant.replicasPerShard - 1)} Slave）`)
     .join("；");
   const gtmLine = data.shape === "distributed"
     ? `${data.gtmBinding.label}；部署亲和为 ${data.reverse ? data.gtmAffinityLabel : data.serverSizing.gtmAffinityLabel}。GTM 本身按主备多机部署，CN 在跨分片事务中申请/释放全局事务标识。`
@@ -3472,11 +3525,11 @@ function renderFormula(data) {
     `性能维度分片 = SUM(ROUNDUP(租户事务 TPS / 标定单主 DN ${data.safeShardTps}TPS)) = ${data.shardByTps}`,
     `推荐 Group = SUM(Max(容量分片, 性能分片))${evenNote}；手工调整低于推荐值时触发红线；当前 Group 合计 ${data.shardCount}`,
     `DN 标定点 = ${data.dnReferenceCores}物理核 / ${data.dnReferenceMemoryGb}GB / ${data.dnReferenceTps}TPS；性能分片与 DN 规格均引用该标定点`,
-    ...data.tenantPlans.map((tenant) => `${tenant.name} DN规格：${tenant.dnSpecFormula}；${tenant.dnSpecReason}`),
+    ...data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} DN规格：${tenant.dnSpecFormula}；${tenant.dnSpecReason}`),
     `说明：官方指南按总 TPS/QPS 与单节点经验性能、数据量共同确定分片数。页面的单核线性折算仅用于规格初算；SQL 复杂度、热点、日志同步、存储延迟会破坏线性关系，生产必须 POC 校准。`,
     `DN 实例 = 租户内分片 × 各租户副本数汇总 = ${data.dnInstances}`,
     `DN 跨租户部署 = ${data.resourceReduction.dnTenantPlacementLabel}${data.resourceReduction.configuredDnTenantPlacement === "auto" ? "（环境自动）" : "（手工指定）"}`,
-    `副本角色 = ${data.tenantPlans.map((tenant) => `${tenant.name} ${tenant.replicasPerShard}副本（1主+${Math.max(0, tenant.replicasPerShard - 1)}从）`).join("；")}`,
+    `副本角色 = ${data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} ${tenant.replicasPerShard}副本（1主+${Math.max(0, tenant.replicasPerShard - 1)}从）`).join("；")}`,
     `GTM 实例 = ${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes}${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}；当前环境推荐每 Group ${data.recommendedGtmReplicasPerGroup} 副本`,
     `管理节点 = ${data.managementNodes} 个；当前环境建议不少于 ${data.recommendedManagementNodes} 个`,
     `控制面实际落位 = 管理 ${data.serverSizing.controlPlaneAudit.actualManagementNodes}/${data.serverSizing.controlPlaneAudit.requestedManagementNodes}，GTM ${data.serverSizing.controlPlaneAudit.actualGtmNodes}/${data.serverSizing.controlPlaneAudit.requestedGtmNodes}`,
@@ -3534,18 +3587,18 @@ function renderReversePlan(data) {
     ["组件组合", `${data.componentLayoutLabel} · ${data.componentSizing.note}`],
     ["资源缩减", `${data.resourceReduction.presetLabel} · 基线 ${data.componentSizing.strictBaselineServers} 台，估算缩减 ${data.componentSizing.savedServers} 台`],
     ["GTM 部署亲和", data.gtmAffinityLabel],
-    ["新增租户服务器策略", data.tenantPlans.map((tenant) => `${tenant.name}: ${tenant.deploymentStrategyLabel}`).join("；")],
+    ["新增租户服务器策略", data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)}: ${tenant.deploymentStrategyLabel}`).join("；")],
     ["CN 租户部署", data.resourceReduction.cnTenantPlacementLabel],
     ["CN 反亲和核对", data.environment === "production"
       ? `同租户一机一 CN；实际落位 ${data.cnPlacementAudit.actual}/${data.cnPlacementAudit.requested}`
       : `POC 按机型密度部署；实际落位 ${data.cnPlacementAudit.actual}/${data.cnPlacementAudit.requested}`],
     ["DN 租户部署", data.resourceReduction.dnTenantPlacementLabel],
     ["GTM Group 副本", `${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 实例（推荐每组 ${data.recommendedGtmReplicasPerGroup}）`],
-    ["GTM 逐组核对", data.gtmGroupPlacementAudit.groups.map((group) => `${group.groupKey} ${group.actual}/${group.expected}`).join("；") || "无 GTM Group"],
+    ["GTM 逐组核对", data.gtmGroupPlacementAudit.groups.map((group) => `${displayRole(group.groupKey, data.tenantPlans)} ${group.actual}/${group.expected}`).join("；") || "无 GTM Group"],
     ["控制面落位核对", `管理 ${data.controlPlaneAudit.actualManagementNodes}/${data.controlPlaneAudit.requestedManagementNodes}；GTM ${data.controlPlaneAudit.actualGtmNodes}/${data.controlPlaneAudit.requestedGtmNodes}`],
     ["服务器使用", `${data.serverPlan.filter((server) => server.roles.length > 0).length}/${data.serverCount} 台有部署组件`],
     ["推荐资源总量", `${data.totalCn} CN / ${data.businessTenants} 租户 / ${data.dnInstances} DN / ${data.gtmNodes} GTM / ${data.managementNodes} 管理`],
-    ["租户分片与副本", data.tenantPlans.map((tenant) => `${tenant.name}: ${tenant.shardCount}分片×${tenant.replicasPerShard}副本`).join("；")],
+    ["租户分片与副本", data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)}: ${tenant.shardCount}分片×${tenant.replicasPerShard}副本`).join("；")],
     ["DN 中心分布", `${data.dnCenterDistribution.centers.map((item) => `${item.az} ${item.instances}实例/${item.hosts}机`).join("；")}。${data.dnCenterDistribution.explanation}`],
     ["综合评分", `${data.scores.weighted}/100`]
   ];
@@ -3577,17 +3630,17 @@ function renderReductionPlan(data) {
   const advice = [
     reduction.allowCnTenantColocation
       ? cnColocation.serverCount
-        ? `跨租户 CN 共宿已实际命中 ${cnColocation.serverCount} 台服务器：${cnColocation.hits.slice(0, 6).map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("；")}。`
+        ? `跨租户 CN 共宿已实际命中 ${cnColocation.serverCount} 台服务器：${cnColocation.hits.slice(0, 6).map((item) => `${item.serverId}[${item.tenants.map((key) => displayTenantKey(key, data.tenantPlans)).join("+")}]`).join("；")}。`
         : "跨租户 CN 混部已启用，但当前租户数量、CN 密度或服务器数量未产生实际共宿。"
       : "CN 按租户独立服务器落位，降低单机故障同时影响多个租户的范围。",
     reduction.allowDnTenantColocation
       ? dnTenantColocation.serverCount
-        ? `跨租户 DN 共宿已实际命中 ${dnTenantColocation.serverCount} 台服务器：${dnTenantColocation.hits.slice(0, 6).map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("；")}。同一 Group 副本反亲和仍是硬约束。`
+        ? `跨租户 DN 共宿已实际命中 ${dnTenantColocation.serverCount} 台服务器：${dnTenantColocation.hits.slice(0, 6).map((item) => `${item.serverId}[${item.tenants.map((key) => displayTenantKey(key, data.tenantPlans)).join("+")}]`).join("；")}。同一 Group 副本反亲和仍是硬约束。`
         : "跨租户 DN 混部已启用，但当前租户数量、DN 密度或服务器数量未产生实际共宿。"
       : "DN 按租户独立物理服务器落位，避免单机故障同时影响多个租户。",
     reduction.allowShardColocation
       ? colocation.serverCount
-        ? `不同 Group 共宿已实际命中 ${colocation.serverCount} 台服务器：${colocation.hits.slice(0, 6).map((item) => `${item.serverId} ${item.tenant}[${item.groups.map((group) => `G${group}`).join("+")}]`).join("；")}。`
+        ? `不同 Group 共宿已实际命中 ${colocation.serverCount} 台服务器：${colocation.hits.slice(0, 6).map((item) => `${item.serverId} ${displayTenantKey(item.tenant, data.tenantPlans)}[${item.groups.map((group) => `G${group}`).join("+")}]`).join("；")}。`
         : `不同 Group 共宿策略已启用，但当前参数未产生实际共宿；单机同租户 DN 上限为 ${reduction.maxTenantDnPerServer}。`
       : "不同 Group 也按单机单 DN 隔离，服务器节省较少但故障域最清晰。",
     ["cnDnMixed", "cnDnGtmMgrMixed"].includes(sizing.effectiveLayout)
@@ -3595,14 +3648,14 @@ function renderReductionPlan(data) {
       : "CN 与 DN 当前保持主机隔离，计算和存储资源边界更清晰。",
     sizing.gtmAffinity === "management"
       ? gtmManagementColocation.serverCount
-        ? `GTM 与管理节点合设已实际命中 ${gtmManagementColocation.serverCount} 台服务器：${gtmManagementColocation.hits.slice(0, 6).map((item) => `${item.serverId}[${item.gtmRoles.join("+")}+管理]`).join("；")}。各副本仍按站点和物理服务器分散。`
+        ? `GTM 与管理节点合设已实际命中 ${gtmManagementColocation.serverCount} 台服务器：${gtmManagementColocation.hits.slice(0, 6).map((item) => `${item.serverId}[${displayRoles(item.gtmRoles).join("+")}+管理]`).join("；")}。各副本仍按站点和物理服务器分散。`
         : "已选择 GTM 与管理节点合设，但当前服务器水位或站点约束未形成实际共宿，请检查控制面服务器规格与数量。"
       : sizing.gtmAffinity === "tenantPool"
         ? "GTM 随租户组件全混布：仅限 POC，不作为核心生产基线。"
         : "GTM 独立部署：事务控制面隔离性最高。",
     reduction.allowGtmGroupColocation
       ? gtmGroupColocation.serverCount
-        ? `不同 GTM Group 共宿已实际命中 ${gtmGroupColocation.serverCount} 台服务器：${gtmGroupColocation.hits.slice(0, 6).map((item) => `${item.serverId}[${item.groups.join("+")}]`).join("；")}。同一 GTM Group 副本仍保持物理服务器反亲和。`
+        ? `不同 GTM Group 共宿已实际命中 ${gtmGroupColocation.serverCount} 台服务器：${gtmGroupColocation.hits.slice(0, 6).map((item) => `${item.serverId}[${displayRoles(item.groups).join("+")}]`).join("；")}。同一 GTM Group 副本仍保持物理服务器反亲和。`
         : "不同 GTM Group 共宿已启用；当前仅有一个 GTM Group，或资源与站点约束未产生实际共宿。"
       : "不同 GTM Group 按物理服务器隔离部署。",
     "可继续缩减的前提是单机 CPU、内存、数据盘、IOPS 和网络均低于规划水位；页面结果是初步装箱估算，最终以版本兼容清单、实测和厂商评审为准。"
@@ -3648,42 +3701,42 @@ function getResourceReductionRedlines(data) {
   const gtmGroupPlacementAudit = data.reverse ? data.gtmGroupPlacementAudit : data.serverSizing.gtmGroupPlacementAudit;
   if (!data.reverse) {
     data.tenantPlans.filter((tenant) => tenant.cnBelowMinimum).forEach((tenant) => {
-      redlines.push(`${tenant.name} 单 AZ CN=${tenant.cnPerAz}，低于性能建议 ${tenant.recommendedCnPerAz}；请增加 CN 或重新压测标定。`);
+      redlines.push(`${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 单 AZ CN=${tenant.cnPerAz}，低于性能建议 ${tenant.recommendedCnPerAz}；请增加 CN 或重新压测标定。`);
     });
     data.tenantPlans.filter((tenant) => tenant.shardBelowMinimum).forEach((tenant) => {
-      redlines.push(`${tenant.name} DN Group=${tenant.shardCount}，低于容量/TPS 水位建议 ${tenant.recommendedShardCount}；请增加 Group。`);
+      redlines.push(`${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} DN Group=${tenant.shardCount}，低于容量/TPS 水位建议 ${tenant.recommendedShardCount}；请增加 Group。`);
     });
   }
   if (cnTenantIsolationViolations.length) {
-    redlines.push(`CN 租户隔离冲突：${cnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("、")}；请增加 CN 服务器或选择跨租户 CN 混部。`);
+    redlines.push(`CN 租户隔离冲突：${cnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.map((key) => displayTenantKey(key, data.tenantPlans)).join("+")}]`).join("、")}；请增加 CN 服务器或选择跨租户 CN 混部。`);
   }
   if (data.environment === "production" && cnSameTenantHostViolations.length) {
-    redlines.push(`生产 CN 同租户同机：${cnSameTenantHostViolations.map((item) => `${item.serverId}[${item.tenant}×${item.count}]`).join("、")}；同一租户每台物理服务器最多部署 1 个 CN。`);
+    redlines.push(`生产 CN 同租户同机：${cnSameTenantHostViolations.map((item) => `${item.serverId}[${displayTenantKey(item.tenant, data.tenantPlans)}×${item.count}]`).join("、")}；同一租户每台物理服务器最多部署 1 个 CN。`);
   }
   if (data.environment === "production" && !cnPlacementAudit.complete) {
-    redlines.push(`CN 落位不完整：实际 ${cnPlacementAudit.actual}/${cnPlacementAudit.requested}；${cnPlacementAudit.tenants.filter((tenant) => !tenant.complete).map((tenant) => `${tenant.tenant} ${tenant.actual}/${tenant.requested}`).join("、")}。请增加 CN 可用服务器，不能以同租户 CN 同机规避资源不足。`);
+    redlines.push(`CN 落位不完整：实际 ${cnPlacementAudit.actual}/${cnPlacementAudit.requested}；${cnPlacementAudit.tenants.filter((tenant) => !tenant.complete).map((tenant) => `${displayTenantKey(tenant.tenant, data.tenantPlans)} ${tenant.actual}/${tenant.requested}`).join("、")}。请增加 CN 可用服务器，不能以同租户 CN 同机规避资源不足。`);
   }
   if (dnTenantIsolationViolations.length) {
-    redlines.push(`DN 租户隔离冲突：${dnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.join("+")}]`).join("、")}；请增加 DN 服务器或明确选择跨租户 DN 混部。`);
+    redlines.push(`DN 租户隔离冲突：${dnTenantIsolationViolations.map((item) => `${item.serverId}[${item.tenants.map((key) => displayTenantKey(key, data.tenantPlans)).join("+")}]`).join("、")}；请增加 DN 服务器或明确选择跨租户 DN 混部。`);
   }
   if (!controlPlaneAudit.complete) {
     redlines.push(`控制面落位不完整：管理节点 ${controlPlaneAudit.actualManagementNodes}/${controlPlaneAudit.requestedManagementNodes}，GTM ${controlPlaneAudit.actualGtmNodes}/${controlPlaneAudit.requestedGtmNodes}；请增加可用主机或调整组件组合。`);
   }
   if (gtmGroupPlacementAudit && !gtmGroupPlacementAudit.complete) {
-    redlines.push(`GTM Group 副本不完整：${gtmGroupPlacementAudit.groups.filter((group) => group.actual !== group.expected).map((group) => `${group.groupKey} ${group.actual}/${group.expected}`).join("、")}；必须按每 Group 副本数补齐实例并保持副本反亲和。`);
+    redlines.push(`GTM Group 副本不完整：${gtmGroupPlacementAudit.groups.filter((group) => group.actual !== group.expected).map((group) => `${displayRole(group.groupKey, data.tenantPlans)} ${group.actual}/${group.expected}`).join("、")}；必须按每 Group 副本数补齐实例并保持副本反亲和。`);
   }
   if (tenantResourcePoolAudit && !tenantResourcePoolAudit.complete) {
-    redlines.push(`新增租户资源池隔离冲突：${tenantResourcePoolAudit.violations.slice(0, 8).map((item) => `${item.serverId}[${item.role}]`).join("、")}；独立部署租户的 CN、DN、专属 GTM 不得落入现有集群服务器。`);
+    redlines.push(`新增租户资源池隔离冲突：${tenantResourcePoolAudit.violations.slice(0, 8).map((item) => `${item.serverId}[${displayRole(item.role, data.tenantPlans)}]`).join("、")}；独立部署租户的 CN、DN、专属 GTM 不得落入现有集群服务器。`);
   }
   const dedicatedDistributedTenants = data.tenantPlans.filter((tenant) => tenant.isDistributed && tenant.deploymentStrategy === "dedicated");
   if (dedicatedDistributedTenants.length && data.gtmBinding.kind === "shared") {
-    redlines.push(`${dedicatedDistributedTenants.map((tenant) => tenant.name).join("、")}选择新增独立服务器，但当前为系统级共享 GTM；若要求 GTM 也物理隔离，请将 GTM 绑定模式改为“每租户专属”。`);
+    redlines.push(`${dedicatedDistributedTenants.map((tenant) => displayTenantKey(getTenantKey(tenant), data.tenantPlans)).join("、")}选择新增独立服务器，但当前为系统级共享 GTM；若要求 GTM 也物理隔离，请将 GTM 绑定模式改为“每租户专属”。`);
   }
   if (dnViolations.length) {
-    redlines.push(`DN 副本同机：${dnViolations.map((item) => item.group).join("、")}；请增加 DN 可用服务器或降低共宿密度。`);
+    redlines.push(`DN 副本同机：${dnViolations.map((item) => displayRole(item.group, data.tenantPlans)).join("、")}；请增加 DN 可用服务器或降低共宿密度。`);
   }
   if (gtmViolations.length) {
-    redlines.push(`GTM 副本同机：${gtmViolations.map((item) => item.group).join("、")}；请增加 GTM/管理主机或改为 GTM 独立部署。`);
+    redlines.push(`GTM 副本同机：${gtmViolations.map((item) => displayRole(item.group, data.tenantPlans)).join("、")}；请增加 GTM/管理主机或改为 GTM 独立部署。`);
   }
   if (managementViolations.length) {
     redlines.push(`管理节点同机：${managementViolations.join("、")} 承载多个管理节点副本；请增加管理主机并保持一机一副本。`);
@@ -3728,13 +3781,13 @@ function renderBusinessServerPlan(data) {
       : `POC 按机型密度部署；实际落位 ${sizing.cnPlacementAudit.actual}/${sizing.cnPlacementAudit.requested}`],
     ["DN 租户部署", data.resourceReduction.dnTenantPlacementLabel],
     ["GTM 部署亲和", sizing.gtmAffinityLabel],
-    ["新增租户服务器策略", data.tenantPlans.map((tenant) => `${tenant.name}: ${tenant.deploymentStrategyLabel}`).join("；")],
+    ["新增租户服务器策略", data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)}: ${tenant.deploymentStrategyLabel}`).join("；")],
     ["GTM Group 副本", `${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 实例（推荐每组 ${data.recommendedGtmReplicasPerGroup}）`],
-    ["GTM 逐组核对", sizing.gtmGroupPlacementAudit.groups.map((group) => `${group.groupKey} ${group.actual}/${group.expected}`).join("；") || "无 GTM Group"],
+    ["GTM 逐组核对", sizing.gtmGroupPlacementAudit.groups.map((group) => `${displayRole(group.groupKey, data.tenantPlans)} ${group.actual}/${group.expected}`).join("；") || "无 GTM Group"],
     ["控制面落位核对", `管理 ${sizing.controlPlaneAudit.actualManagementNodes}/${sizing.controlPlaneAudit.requestedManagementNodes}；GTM ${sizing.controlPlaneAudit.actualGtmNodes}/${sizing.controlPlaneAudit.requestedGtmNodes}`],
     ["推荐资源总量", `${data.totalCn} CN / ${data.businessTenants} 租户 / ${data.dnInstances} DN / ${data.gtmNodes} GTM / ${data.managementNodes} 管理`],
     ["站点容量关系", `${azNames.map((az, index) => `${az} ${round(data.siteCapacityFactors[index] * 100)}%`).join("；")}。同城生产侧按对等容量，异地侧按显式灾备比例。`],
-    ["租户分片与副本", data.tenantPlans.map((tenant) => `${tenant.name}: ${tenant.shardCount}分片×${tenant.replicasPerShard}副本`).join("；")],
+    ["租户分片与副本", data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)}: ${tenant.shardCount}分片×${tenant.replicasPerShard}副本`).join("；")],
     ["资源预留后可用", `${sizing.usableSpec}，预留 ${round(sizing.reserveRatio * 100)}%`],
     ["推荐服务器数", `${sizing.recommendedServers} 台 · ${sizing.deploymentStyle}`],
     ["资源缩减对比", `严格隔离 ${sizing.strictBaselineServers} 台 → 当前 ${sizing.recommendedServers} 台，估算减少 ${sizing.savedServers} 台`],
@@ -3796,14 +3849,14 @@ function renderBusinessPhysicalServerRow(server) {
     <article class="server-row physical-output-row">
       <strong>${server.id}</strong>
       <span>${server.az} / ${server.rack}</span>
-      <small>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")} / ${escapeAttr(server.hostGroup)}：${escapeAttr(server.roles.length ? server.roles.join(" / ") : "故障接管与扩容预留")}</small>
+      <small>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")} / ${escapeAttr(server.hostGroup)}：${escapeAttr(server.roles.length ? displayRoles(server.roles).join(" / ") : "故障接管与扩容预留")}</small>
       <i>${escapeAttr(specText)}</i>
     </article>
   `;
 }
 
 function renderServerPlanRow(server) {
-  const roleText = server.roles.length ? server.roles.join(" / ") : "预留";
+  const roleText = server.roles.length ? displayRoles(server.roles).join(" / ") : "预留";
   return `
     <article class="server-row">
       <strong>${server.id}</strong>
@@ -3875,9 +3928,9 @@ function getShardColocationState(data) {
   const hits = [];
   servers.forEach((server) => {
     data.tenantPlans.forEach((tenant) => {
-      const placements = getTenantDnPlacements(server, tenant.name);
+      const placements = getTenantDnPlacements(server, getTenantKey(tenant));
       const groups = [...new Set(placements.map((item) => item.group))];
-      if (groups.length > 1) hits.push({ serverId: server.id, tenant: tenant.name, groups });
+      if (groups.length > 1) hits.push({ serverId: server.id, tenant: getTenantKey(tenant), groups });
     });
   });
   return {
@@ -3944,7 +3997,7 @@ function renderTenantDnPlacement(placements) {
     <div class="ppt-dn-placement ${uniqueGroups.length > 1 ? "is-colocated" : ""}">
       ${uniqueGroups.length > 1 ? `<span class="group-colocation-badge">同租户多 Group 共宿 · ${uniqueGroups.map((group) => `G${group}`).join(" + ")}</span>` : ""}
       <div class="ppt-dn-group-list">
-        ${placements.map((item) => `<span class="ppt-dn-group-token">${escapeAttr(item.tenant)}-DN-G${item.group}-${escapeAttr(item.role)}</span>`).join("")}
+        ${placements.map((item) => `<span class="ppt-dn-group-token">${escapeAttr(displayTenantKey(item.tenant))}-DN-G${item.group}-${escapeAttr(item.role)}</span>`).join("")}
       </div>
     </div>
   `;
@@ -3961,7 +4014,7 @@ function renderPptNetworkPlan(data) {
       <section class="ppt-site-column ${isDisasterSite(data.mode, azIndex) ? "disaster" : ""}">
         <header><strong>${az}</strong><span>${getSiteRole(data.mode, azIndex)}</span></header>
         <div class="ppt-site-apps">
-          ${data.tenantPlans.slice(0, 4).map((tenant) => `<span>${escapeAttr(tenant.name)}业务接入</span>`).join("")}
+          ${data.tenantPlans.slice(0, 4).map((tenant) => `<span>${escapeAttr(displayTenantKey(getTenantKey(tenant), data.tenantPlans))}业务接入</span>`).join("")}
         </div>
         <div class="ppt-host-groups">
           ${grouped.map(([groupName, groupServers]) => `
@@ -3982,7 +4035,7 @@ function renderPptNetworkPlan(data) {
     <div class="ppt-network-board" style="--site-count:${data.azCount}">
       <div class="ppt-workload-row">
         <strong>业务系统</strong>
-        ${data.tenantPlans.slice(0, 6).map((tenant) => `<span>${escapeAttr(tenant.name)} · ${escapeAttr(tenant.type)}</span>`).join("")}
+        ${data.tenantPlans.slice(0, 6).map((tenant) => `<span>${escapeAttr(displayTenantKey(getTenantKey(tenant), data.tenantPlans))} · ${escapeAttr(tenant.type)}</span>`).join("")}
       </div>
       <div class="ppt-site-grid">${siteColumns}</div>
       <div class="ppt-link-band ${data.mode === "local1az" ? "single" : ""}">
@@ -3998,19 +4051,19 @@ function renderPptNetworkPlan(data) {
 
 function renderPptLogicalServer(server, data) {
   const tenantGroups = data.tenantPlans.map((tenant, tenantIndex) => {
-    const roles = server.roles.filter((role) => role.startsWith(`${tenant.name}-`));
+    const roles = server.roles.filter((role) => role.startsWith(`${getTenantKey(tenant)}-`));
     if (!roles.length) return "";
-    const dnPlacements = getTenantDnPlacements(server, tenant.name);
+    const dnPlacements = getTenantDnPlacements(server, getTenantKey(tenant));
     const nonDnRoles = roles.filter((role) => !isDnRole(role));
     return `
       <div class="ppt-tenant-boundary tenant-${tenantIndex % 4}">
-        <b>${escapeAttr(tenant.name)}</b>
+        <b>${escapeAttr(displayTenantKey(getTenantKey(tenant)))}</b>
         ${nonDnRoles.length ? `<div>${nonDnRoles.slice(0, 6).map(renderPptRolePill).join("")}${nonDnRoles.length > 6 ? `<span class="role-more">+${nonDnRoles.length - 6}</span>` : ""}</div>` : ""}
         ${renderTenantDnPlacement(dnPlacements)}
       </div>
     `;
   }).join("");
-  const systemRoles = server.roles.filter((role) => !data.tenantPlans.some((tenant) => role.startsWith(`${tenant.name}-`)));
+  const systemRoles = server.roles.filter((role) => !data.tenantPlans.some((tenant) => role.startsWith(`${getTenantKey(tenant)}-`)));
   const systemGroup = systemRoles.length ? `
     <div class="ppt-system-boundary">
       <b>集群管理域</b>
@@ -4028,10 +4081,10 @@ function renderPptLogicalServer(server, data) {
 
 function renderPptRolePill(role) {
   const type = isCnRole(role) ? "cn" : isDnRole(role) ? "dn" : isGtmRole(role) ? "gtm" : "management";
-  const label = role
+  const label = displayRole(role)
     .replace(/-Master$/, "-M")
     .replace(/-Slave(\d*)$/, (_, no) => `-S${no || "1"}`);
-  return `<span class="ppt-role-pill ${type}" title="${escapeAttr(role)}">${escapeAttr(label)}</span>`;
+  return `<span class="ppt-role-pill ${type}" title="${escapeAttr(displayRole(role))}">${escapeAttr(label)}</span>`;
 }
 
 function renderPptServerTopology(data) {
@@ -4195,7 +4248,7 @@ function renderBusinessSite(site, data) {
   const mgrText = site.disaster ? "管理备" : "管理节点";
   const tenantBrief = data.tenantPlans
     .slice(0, 3)
-    .map((tenant) => `<span>${escapeAttr(tenant.name)}: CN ${tenant.cnPerAz}/AZ · DN ${tenant.shardCount}G×${tenant.replicasPerShard}</span>`)
+    .map((tenant) => `<span>${escapeAttr(displayTenantKey(getTenantKey(tenant)))}: CN ${tenant.cnPerAz}/AZ · DN ${tenant.shardCount}G×${tenant.replicasPerShard}</span>`)
     .join("");
 
   return `
@@ -4218,7 +4271,7 @@ function renderBusinessHaMatrix(data) {
     .map((tenant) => `
       <article class="business-ha-tenant">
         <div>
-          <strong>${escapeAttr(tenant.name)}</strong>
+          <strong>${escapeAttr(displayTenantKey(getTenantKey(tenant), data.tenantPlans))}</strong>
           <span>${escapeAttr(tenant.type)}</span>
         </div>
         <p>CN：${tenant.cnPerAz}/AZ，单 CN 推荐 ${tenant.cnSpecLabel || `${tenant.cnCores}C/${tenant.cnMemoryGb}GB`}；DN：${tenant.shardCount} Group，单 DN 推荐 ${tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`}。</p>
@@ -4245,7 +4298,7 @@ function renderReverseTopology(data) {
     .slice(0, 8)
     .map((tenant) => `
       <article class="reverse-tenant-map-card">
-        <strong>${escapeAttr(tenant.name)}</strong>
+        <strong>${escapeAttr(displayTenantKey(getTenantKey(tenant), data.tenantPlans))}</strong>
         <span>${escapeAttr(tenant.type)}</span>
         <small>CN ${tenant.cnPerAz}/AZ · DN ${tenant.shardCount} Group × ${tenant.replicasPerShard} 副本 = ${tenant.dnInstances} 实例</small>
         <small>${tenant.gtmGroupText}</small>
@@ -4340,17 +4393,17 @@ function renderTopologyServerTiles(servers) {
 }
 
 function renderTenantComponentChain(tenant, serverPlan) {
-  const tenantCnRoles = getTenantRolesFromServers(tenant.name, serverPlan, isCnRole);
+  const tenantCnRoles = getTenantRolesFromServers(getTenantKey(tenant), serverPlan, isCnRole);
   const cnNodes = (tenantCnRoles.length
     ? tenantCnRoles
-    : Array.from({ length: tenant.cnPerAz }, (_, index) => `${tenant.name}-CN${index + 1}`))
+    : Array.from({ length: tenant.cnPerAz }, (_, index) => `${getTenantKey(tenant)}-CN${index + 1}`))
     .slice(0, 8);
   const dnNodes = [];
   for (let group = 1; group <= Math.min(tenant.shardCount, 4); group += 1) {
-    dnNodes.push(`${tenant.name}-DN-G${group}-Master`);
+    dnNodes.push(`${getTenantKey(tenant)}-DN-G${group}-Master`);
     const slaveCount = Math.min(Math.max(0, tenant.replicasPerShard - 1), 2);
     for (let slave = 1; slave <= slaveCount; slave += 1) {
-      dnNodes.push(`${tenant.name}-DN-G${group}-Slave${slave}`);
+      dnNodes.push(`${getTenantKey(tenant)}-DN-G${group}-Slave${slave}`);
     }
   }
   const hiddenDn = tenant.shardCount > 4 || tenant.replicasPerShard > 3
@@ -4358,7 +4411,7 @@ function renderTenantComponentChain(tenant, serverPlan) {
     : "";
   const tenantGtmRoles = getTenantGtmRolesFromServers(tenant, serverPlan);
   const gtmNodes = tenantGtmRoles.length ? tenantGtmRoles : tenant.isDistributed
-    ? [tenant.gtmLabel.includes("共享") ? "GTM-SYS" : `${tenant.name}-GTM1`]
+    ? [tenant.gtmLabel.includes("共享") ? "GTM-SYS" : `${getTenantKey(tenant)}-GTM1`]
     : ["GTM 可选"];
   const cnServerText = renderComponentServerMap(cnNodes, serverPlan, "cn");
   const dnServerText = renderComponentServerMap(dnNodes, serverPlan, "dn");
@@ -4367,25 +4420,25 @@ function renderTenantComponentChain(tenant, serverPlan) {
   return `
     <article class="tenant-chain-card">
       <div class="tenant-chain-root">
-        <strong>${escapeAttr(tenant.name)}</strong>
+        <strong>${escapeAttr(displayTenantKey(getTenantKey(tenant)))}</strong>
         <small>${escapeAttr(tenant.type)}</small>
       </div>
       <div class="tenant-chain-arrow">应用连接</div>
       <div class="tenant-chain-group cn">
         <b>CN 计算入口</b>
-        <div>${cnNodes.map((node) => `<span>${escapeAttr(node)}</span>`).join("")}</div>
+        <div>${cnNodes.map((node) => `<span>${escapeAttr(displayRole(node))}</span>`).join("")}</div>
         <small class="tenant-chain-server-map">${escapeAttr(cnServerText)}</small>
       </div>
       <div class="tenant-chain-arrow">路由访问</div>
       <div class="tenant-chain-group dn">
         <b>DN 分片与副本</b>
-        <div>${dnNodes.map((node) => `<span>${escapeAttr(node)}</span>`).join("")}${hiddenDn}</div>
+        <div>${dnNodes.map((node) => `<span>${escapeAttr(displayRole(node))}</span>`).join("")}${hiddenDn}</div>
         <small class="tenant-chain-server-map">${escapeAttr(dnServerText)}</small>
       </div>
       <div class="tenant-chain-arrow">全局事务</div>
       <div class="tenant-chain-group gtm">
         <b>GTM 绑定</b>
-        <div>${gtmNodes.map((node) => `<span>${escapeAttr(node)}</span>`).join("")}<small>${escapeAttr(tenant.gtmGroupText)}</small></div>
+        <div>${gtmNodes.map((node) => `<span>${escapeAttr(displayRole(node))}</span>`).join("")}<small>${escapeAttr(tenant.gtmGroupText)}</small></div>
         <small class="tenant-chain-server-map">${escapeAttr(gtmServerText)}</small>
       </div>
     </article>
@@ -4408,7 +4461,7 @@ function getTenantGtmRolesFromServers(tenant, serverPlan) {
   const roles = [];
   serverPlan.forEach((server) => {
     server.roles.forEach((role) => {
-      const matchesDedicated = role.startsWith(`${tenant.name}-GTM`);
+      const matchesDedicated = role.startsWith(`${getTenantKey(tenant)}-GTM`);
       const matchesShared = tenant.gtmLabel.includes("共享") && role.startsWith("GTM-SYS");
       if ((matchesDedicated || matchesShared) && !roles.includes(role)) {
         roles.push(role);
@@ -4422,7 +4475,7 @@ function renderComponentServerMap(nodes, serverPlan, type) {
   const pairs = nodes
     .map((node) => {
       const server = findServerForComponent(node, serverPlan, type);
-      return server ? `${node}@${server.id}` : `${node}@待分配`;
+      return server ? `${displayRole(node)}@${server.id}` : `${displayRole(node)}@待分配`;
     })
     .slice(0, 5);
   const more = nodes.length > 5 ? ` / +${nodes.length - 5} 项` : "";
@@ -4468,7 +4521,7 @@ function renderServerDnGroupMap(roles) {
         const groups = [...new Set(placements.map((item) => item.group))];
         return `<span class="${groups.length > 1 ? "is-colocated" : ""}">${placements
           .sort((a, b) => a.group - b.group || a.role.localeCompare(b.role))
-          .map((item) => `${escapeAttr(tenant)}-DN-G${item.group}-${escapeAttr(item.role)}`)
+          .map((item) => `${escapeAttr(displayTenantKey(tenant))}-DN-G${item.group}-${escapeAttr(item.role)}`)
           .join(" + ")}${groups.length > 1 ? " · 多Group共宿" : ""}</span>`;
       }).join("")}
     </div>
@@ -4478,18 +4531,18 @@ function renderServerDnGroupMap(roles) {
 function renderServerCnTenantMap(roles) {
   const tenants = [...new Set(roles.map(parseCnTenant).filter(Boolean))];
   if (!tenants.length) return "";
-  return `<div class="physical-cn-tenant-map ${tenants.length > 1 ? "is-shared" : ""}"><b>CN 租户</b><span>${escapeAttr(tenants.join(" + "))}${tenants.length > 1 ? " · 跨租户共宿" : " · 独立"}</span></div>`;
+  return `<div class="physical-cn-tenant-map ${tenants.length > 1 ? "is-shared" : ""}"><b>CN 租户</b><span>${escapeAttr(tenants.map((key) => displayTenantKey(key)).join(" + "))}${tenants.length > 1 ? " · 跨租户共宿" : " · 独立"}</span></div>`;
 }
 
 function renderServerGtmGroupMap(roles) {
   const groups = [...new Set(roles.map(getGtmRoleGroupKey).filter(Boolean))];
   if (groups.length < 2) return "";
-  return `<div class="physical-gtm-group-map"><b>GTM Group</b><span>${escapeAttr(groups.join(" + "))} · 跨组共宿</span></div>`;
+  return `<div class="physical-gtm-group-map"><b>GTM Group</b><span>${escapeAttr(displayRoles(groups).join(" + "))} · 跨组共宿</span></div>`;
 }
 
 function renderServerRoleDetail(roles) {
   if (!roles.length) return "无组件，作为扩容或故障接管预留";
-  const visible = roles.slice(0, 4).join(" / ");
+  const visible = displayRoles(roles.slice(0, 4)).join(" / ");
   const hidden = roles.length > 4 ? ` / +${roles.length - 4} 项` : "";
   return `${visible}${hidden}`;
 }
@@ -4571,7 +4624,7 @@ function renderServerBoard(data) {
         ${data.serverPlan.map((server) => `
           <article class="server-tile">
             <div><strong>${server.id}</strong><span>${server.az}</span></div>
-            <p>${escapeAttr(server.roles.length ? server.roles.join(" / ") : "预留资源")}</p>
+            <p>${escapeAttr(server.roles.length ? displayRoles(server.roles).join(" / ") : "预留资源")}</p>
             <small>CPU ${server.cpuLoad}% · 磁盘 ${server.diskLoad}%</small>
           </article>
         `).join("")}
@@ -4606,7 +4659,7 @@ function renderTenantCard(tenant) {
   return `
     <article class="tenant-card">
       <div class="tenant-title">
-        <strong>${escapeAttr(tenant.name)}</strong>
+        <strong>${escapeAttr(displayTenantKey(getTenantKey(tenant)))}</strong>
         <span>${escapeAttr(tenant.type)}</span>
       </div>
       <div class="tenant-resource-grid">
@@ -4818,8 +4871,8 @@ const excelStyles = Object.freeze({
   reserve: 20
 });
 
-function formatExcelRole(role) {
-  return role
+function formatExcelRole(role, tenants = latestDesignData?.tenantPlans || []) {
+  return displayRole(role, tenants)
     .replace(/-Master$/, "-M")
     .replace(/-Slave(\d*)$/, (_, no) => `-S${no || "1"}`);
 }
@@ -4985,7 +5038,7 @@ function buildNetworkPlanningSheet(data, servers, azNames) {
           if (server) {
             const poolLabel = server.tenantPoolLabel || "现有集群共享服务器";
             setCell(dataRow, serverColumn, `${server.id}\nIP：待规划\n${poolLabel}`, server.tenantPool && server.tenantPool !== "shared" ? excelStyles.dedicatedServer : excelStyles.sharedServer);
-            setCell(dataRow, roleColumn, server.roles.length ? server.roles.map(formatExcelRole).join("\n") : "SLOTH / 扩容预留", getExcelComponentStyle(server));
+            setCell(dataRow, roleColumn, server.roles.length ? server.roles.map((role) => formatExcelRole(role, data.tenantPlans)).join("\n") : "SLOTH / 扩容预留", getExcelComponentStyle(server));
             maxRoleCount = Math.max(maxRoleCount, server.roles.length);
           } else {
             setCell(dataRow, serverColumn, "扩容预留", excelStyles.reserve);
@@ -5074,7 +5127,7 @@ function buildExcelSheets(data) {
   const tenantHeaders = [
     "租户", "服务器策略", "形态", "QPS", "事务TPS", "CN/生产AZ", "CN自动建议", "CN手工",
     "各站点CN", "CN总数", "DN Group", "Group建议", "Group手工", "副本/Group", "DN实例",
-    "规划数据TB", "GTM绑定", "CN规格", "DN规格", "容量校验"
+    "规划数据TB", "GTM绑定", "CN规格", "DN规格", "容量校验", "租户ID"
   ];
   const tenantRows = data.tenantPlans.map((tenant) => [
     tenant.name,
@@ -5096,14 +5149,15 @@ function buildExcelSheets(data) {
     tenant.gtmGroupText,
     tenant.cnSpecLabel || `${tenant.cnCores}C/${tenant.cnMemoryGb}GB`,
     tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`,
-    tenant.cnBelowMinimum || tenant.shardBelowMinimum ? "未通过" : "通过"
+    tenant.cnBelowMinimum || tenant.shardBelowMinimum ? "未通过" : "通过",
+    tenant.tenantId
   ]);
   const tenantSheet = buildExcelTableSheet({
     name: "租户资源",
     title: "租户 CN / DN / GTM 资源规划",
     headers: tenantHeaders,
     dataRows: tenantRows,
-    widths: [14, 24, 20, 14, 14, 14, 14, 10, 42, 12, 13, 13, 10, 13, 12, 14, 28, 18, 18, 14],
+    widths: [14, 24, 20, 14, 14, 14, 14, 10, 42, 12, 13, 13, 10, 13, 12, 14, 28, 18, 18, 14, 16],
     rowStyle(values, index, defaultStyles) {
       defaultStyles[1] = data.tenantPlans[index]?.deploymentStrategy === "dedicated" ? excelStyles.dedicatedServer : excelStyles.sharedServer;
       defaultStyles[19] = values[19] === "通过" ? excelStyles.pass : excelStyles.risk;
@@ -5129,7 +5183,7 @@ function buildExcelSheets(data) {
       server.roles.filter(isDnRole).length,
       server.roles.filter(isGtmRole).length,
       server.roles.filter((role) => role === "管理节点").length,
-      server.roles.map(formatExcelRole).join(" / ") || "扩容预留",
+      server.roles.map((role) => formatExcelRole(role, data.tenantPlans)).join(" / ") || "扩容预留",
       audit?.cpuPercent ?? server.cpuLoad ?? 0,
       audit?.memoryPercent ?? 0,
       audit?.diskPercent ?? server.diskLoad ?? 0,
@@ -5160,16 +5214,17 @@ function buildExcelSheets(data) {
     server.az,
     server.rack,
     server.tenantPoolLabel || "现有集群共享服务器",
-    parseCnTenant(role) || parseDnPlacementRole(role)?.tenant || (/^(.*)-GTM\d+$/.exec(role)?.[1]) || "集群管理域",
+    displayTenantKey(parseCnTenant(role) || parseDnPlacementRole(role)?.tenant || (/^(.*)-GTM\d+$/.exec(role)?.[1]) || "集群管理域", data.tenantPlans),
     isCnRole(role) ? "CN" : isDnRole(role) ? "DN" : isGtmRole(role) ? "GTM" : "管理节点",
-    formatExcelRole(role)
+    formatExcelRole(role, data.tenantPlans),
+    role
   ])));
   const instanceSheet = buildExcelTableSheet({
     name: "组件实例",
     title: "GoldenDB 组件实例明细",
-    headers: ["服务器", "中心/AZ", "机柜", "资源池", "租户/系统域", "组件类型", "实例名称"],
+    headers: ["服务器", "中心/AZ", "机柜", "资源池", "租户/系统域", "组件类型", "实例名称", "实例ID"],
     dataRows: instanceRows,
-    widths: [14, 14, 14, 28, 20, 14, 30],
+    widths: [14, 14, 14, 28, 20, 14, 30, 28],
     rowStyle(values, index, defaultStyles) {
       const componentStyle = values[5] === "CN" ? excelStyles.cnComponent
         : values[5] === "DN" ? excelStyles.dnComponent
@@ -5209,7 +5264,7 @@ function buildExcelSheets(data) {
   (sizing.gtmGroupPlacementAudit?.groups || []).forEach((group) => riskRows.push([
     "GTM副本",
     group.actual === group.expected ? "通过" : "高风险",
-    group.groupKey,
+    displayRole(group.groupKey, data.tenantPlans),
     `实际 ${group.actual} / 应有 ${group.expected}；同 Group 副本必须跨物理服务器`
   ]));
   const riskSheet = buildExcelTableSheet({
@@ -5820,6 +5875,7 @@ function syncDnPlanningOutputs({ dnSingleCoreTps, safeShardTps }) {
 
 function createBusinessTenantSpec(index) {
   const tenant = {
+    tenantId: createTenantIdentity(),
     name: `租户${index}`,
     type: $("dbShape").value === "centralized" ? "centralized" : "distributed",
     deploymentStrategy: index === 1 ? "shared" : "dedicated",
@@ -5838,6 +5894,7 @@ function createBusinessTenantSpec(index) {
 
 function createReverseTenantSpec(index) {
   return {
+    tenantId: createTenantIdentity(),
     name: `租户${index}`,
     type: "distributed",
     deploymentStrategy: index === 1 ? "shared" : "dedicated",
