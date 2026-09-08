@@ -39,6 +39,7 @@ const inputs = [
   "cpuLimit",
   "years",
   "growthFactor",
+  "transactionGrowthFactor",
   "maxShardTb",
   "safeShardTps",
   "dnReferenceCores",
@@ -171,6 +172,7 @@ const defaults = {
   cpuLimit: 0.7,
   years: 1,
   growthFactor: 1,
+  transactionGrowthFactor: 1,
   maxShardTb: 2,
   safeShardTps: 2000,
   dnReferenceCores: 16,
@@ -254,6 +256,19 @@ const planningLimits = Object.freeze({ tenants: 100, instances: 2000, servers: 2
 
 class PlanningInputError extends Error {}
 
+function xmlTextError(raw, label = "文本") {
+  // XML 1.0 permits paired supplementary Unicode, but not lone surrogates.
+  for (const character of String(raw ?? "")) {
+    const code = character.codePointAt(0);
+    if (code === 9 || code === 10 || code === 13
+      || (code >= 0x20 && code <= 0xD7FF)
+      || (code >= 0xE000 && code <= 0xFFFD)
+      || (code >= 0x10000 && code <= 0x10FFFF)) continue;
+    return `${label}含不支持的字符 U+${code.toString(16).toUpperCase().padStart(4, "0")}，请删除或替换该字符后重新计算。`;
+  }
+  return null;
+}
+
 function numericInputError(raw, label, { min = 1, max = Number.MAX_SAFE_INTEGER, integer = false } = {}) {
   if (raw === null || raw === undefined || String(raw).trim() === "") return `${label}不能为空`;
   const value = Number(raw);
@@ -287,6 +302,8 @@ function getPlanningInputIssues(module = $("designModule").value) {
   }
   if (!specs.length || specs.length > planningLimits.tenants) issues.push(`本地规划支持 1 至 ${planningLimits.tenants} 个租户（浏览器规模保护，非产品限制）`);
   specs.forEach((tenant, index) => {
+    const textError = xmlTextError(tenant.name, `租户 ${index + 1} 名称`);
+    if (textError) issues.push(textError);
     const rules = module === "reverse"
       ? { cnPerAz: [1, true], cnCores: [1, true], cnMemoryGb: [1, true], dnCores: [1, true], dnMemoryGb: [1, true] }
       : { qps: [1, true], dataTb: [0.1, false] };
@@ -300,6 +317,16 @@ function getPlanningInputIssues(module = $("designModule").value) {
       if (error) issues.push(error);
     });
   });
+  if (module === "business" && $("businessServerConfigMode").value === "customer") {
+    componentServerDefinitions.forEach(({ key, label }) => {
+      if (!$(componentInputId(key, "Enabled")).checked) return;
+      ["Model", "CpuModel", "Network", "SystemDisk"].forEach((field) => {
+        const input = $(componentInputId(key, field));
+        const error = xmlTextError(input.value, `${label} ${input.closest("label")?.querySelector("span")?.textContent || field}`);
+        if (error) issues.push(error);
+      });
+    });
+  }
   return issues;
 }
 
@@ -536,6 +563,7 @@ function calculate() {
   const cpuLimit = numberValue("cpuLimit");
   const years = numberValue("years");
   const growthFactor = numberValue("growthFactor");
+  const transactionGrowthFactor = numberValue("transactionGrowthFactor");
   const maxShardTb = numberValue("maxShardTb");
   const dnReferenceCores = Math.max(1, numberValue("dnReferenceCores"));
   const dnReferenceMemoryGb = Math.max(1, numberValue("dnReferenceMemoryGb"));
@@ -554,6 +582,7 @@ function calculate() {
   const requestedGtmAffinity = resourceReduction.requestedGtmAffinity;
 
   const growthPower = Math.pow(growthFactor, years);
+  const transactionGrowthPower = Math.pow(transactionGrowthFactor, years);
   const cnSingleNodeTps = singleCoreTps * cpuCores * cpuLimit;
   const azCount = getAzCount(mode);
   const siteCapacityFactors = getSiteCapacityFactors(mode, drCapacityRatio);
@@ -564,8 +593,11 @@ function calculate() {
     specs: businessTenantSpecs,
     sqlPerTxn,
     cnSingleNodeTps,
+    singleCoreTps,
+    cpuCores,
     cpuLimit,
     growthPower,
+    transactionGrowthPower,
     maxShardTb,
     safeShardTps,
     dnSingleCoreTps,
@@ -645,6 +677,8 @@ function calculate() {
     years,
     growthFactor,
     growthPower,
+    transactionGrowthFactor,
+    transactionGrowthPower,
     dataTb,
     maxShardTb,
     minShards,
@@ -2566,7 +2600,7 @@ function getBusinessGtmNodes(shape, mode, binding, environment) {
 
 function buildBusinessTenantPlans(data) {
   ensureTenantIdentities(data.specs);
-  ["sqlPerTxn", "cnSingleNodeTps", "growthPower", "maxShardTb", "safeShardTps"].forEach((key) => {
+  ["sqlPerTxn", "cnSingleNodeTps", "growthPower", "transactionGrowthPower", "maxShardTb", "safeShardTps"].forEach((key) => {
     const error = numericInputError(data[key], key, { min: Number.MIN_VALUE });
     if (error) throw new PlanningInputError(error);
   });
@@ -2579,13 +2613,14 @@ function buildBusinessTenantPlans(data) {
     const configuredMinShards = Math.max(1, Math.floor(Number(spec.minShards) || 1));
     const futureDataTb = dataTb * data.growthPower;
     const businessTxnTps = qps / data.sqlPerTxn;
-    const cnRaw = Math.ceil(businessTxnTps / data.cnSingleNodeTps) * data.growthPower;
+    const plannedTxnTps = businessTxnTps * data.transactionGrowthPower;
+    const cnRaw = Math.ceil(plannedTxnTps / data.cnSingleNodeTps);
     const recommendedCnPerAz = maybeEven(Math.max(2, cnRaw), data.forceEven);
     const cnPerAz = spec.cnPerAzManual
       ? Math.max(1, Math.floor(Number(spec.cnPerAz) || 1))
       : recommendedCnPerAz;
     const shardByCapacity = Math.ceil(futureDataTb / data.maxShardTb);
-    const shardByTps = Math.ceil(businessTxnTps / data.safeShardTps);
+    const shardByTps = Math.ceil(plannedTxnTps / data.safeShardTps);
     const recommendedShardCount = isDistributed
       ? maybeEven(Math.max(1, shardByCapacity, shardByTps), data.forceEven)
       : 1;
@@ -2600,12 +2635,14 @@ function buildBusinessTenantPlans(data) {
     const cnByAz = data.siteCapacityFactors.map((factor) => Math.max(1, Math.ceil(cnPerAz * factor)));
     const totalTenantCn = cnByAz.reduce((sum, count) => sum + count, 0);
     const cnSpec = recommendCnNodeSpec({
-      tenantTxnTps: businessTxnTps,
+      tenantTxnTps: plannedTxnTps,
       cnPerAz,
+      singleCoreTps: data.singleCoreTps,
+      maxCores: data.cpuCores,
       cpuLimit: data.cpuLimit
     });
     const dnSpec = recommendDnNodeSpec({
-      tenantTxnTps: businessTxnTps,
+      tenantTxnTps: plannedTxnTps,
       futureDataTb,
       shardCount,
       safeShardTps: data.safeShardTps,
@@ -2628,12 +2665,16 @@ function buildBusinessTenantPlans(data) {
       futureDataTb,
       minShards,
       businessTxnTps,
+      plannedTxnTps,
       cnRaw,
       recommendedCnPerAz,
       cnPerAz,
       cnByAz,
       cnManual: Boolean(spec.cnPerAzManual),
-      cnBelowMinimum: cnPerAz < recommendedCnPerAz,
+      cnBelowMinimum: cnPerAz < 2 || cnSpec.safeTps * cnPerAz < plannedTxnTps,
+      cnSafeTpsPerNode: cnSpec.safeTps,
+      cnSafeTpsPerAz: cnSpec.safeTps * cnPerAz,
+      cnTargetTps: plannedTxnTps,
       totalCn: totalTenantCn,
       cnCores: cnSpec.cores,
       cnMemoryGb: cnSpec.memoryGb,
@@ -2729,35 +2770,21 @@ function buildReverseTenantPlans(data) {
 
 function recommendCnNodeSpec(data) {
   const perCnTps = data.tenantTxnTps / Math.max(1, data.cnPerAz);
-  if (perCnTps <= 800) {
-    return {
-      cores: 8,
-      memoryGb: 16,
-      label: "8C / 16GB",
-      reason: `单 CN 约 ${round(perCnTps)} TPS，适合轻量交易入口`
-    };
-  }
-  if (perCnTps <= 1600) {
-    return {
-      cores: 16,
-      memoryGb: 32,
-      label: "16C / 32GB",
-      reason: `单 CN 约 ${round(perCnTps)} TPS，适合中等并发`
-    };
-  }
-  if (perCnTps <= 3200) {
-    return {
-      cores: 32,
-      memoryGb: 64,
-      label: "32C / 64GB",
-      reason: `单 CN 约 ${round(perCnTps)} TPS，适合高并发 SQL 路由与执行`
-    };
-  }
+  ["singleCoreTps", "cpuLimit", "maxCores"].forEach((key) => {
+    const error = numericInputError(data[key], key, { min: Number.MIN_VALUE });
+    if (error) throw new PlanningInputError(error);
+  });
+  const safePerCore = data.singleCoreTps * data.cpuLimit;
+  const requiredCores = Math.ceil(perCnTps / safePerCore);
+  const cores = [8, 16, 32, 64].find((value) => value >= requiredCores && value <= data.maxCores)
+    || data.maxCores;
+  const safeTps = cores * safePerCore;
   return {
-    cores: 64,
-    memoryGb: 128,
-    label: "64C / 128GB",
-    reason: `单 CN 约 ${round(perCnTps)} TPS，建议高规格并配合压测拆分入口`
+    cores,
+    memoryGb: cores * 2,
+    safeTps,
+    label: `${cores}C / ${cores * 2}GB`,
+    reason: `单 CN 目标 ${round(perCnTps)} TPS；所需物理核 = CEIL(${round(perCnTps)} / (${data.singleCoreTps} × ${data.cpuLimit})) = ${requiredCores}；配置 ${cores} 核，安全能力 ${round(safeTps)} TPS。内存按现有 2GB/核估算，须压测确认。`
   };
 }
 
@@ -3356,7 +3383,7 @@ function renderRisks(data) {
   }
   data.tenantPlans.forEach((tenant) => {
     if (tenant.cnBelowMinimum) {
-      risks.push(["risk-high", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 手工设置每生产 AZ ${tenant.cnPerAz} 个 CN，低于性能公式建议的 ${tenant.recommendedCnPerAz} 个；单 AZ 无法独立满足当前租户性能目标。`]);
+      risks.push(["risk-high", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 每生产 AZ ${tenant.cnPerAz} 个 CN，最终规格安全能力 ${round(tenant.cnSafeTpsPerAz)} TPS，目标 ${round(tenant.cnTargetTps)} TPS；未满足性能目标或当前至少 2 个 CN 的冗余规则，请增加节点或调整标定规格。`]);
     }
     if (tenant.shardBelowMinimum) {
       risks.push(["risk-high", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 手工设置 ${tenant.shardCount} 个 DN Group，低于容量/TPS 水位建议的 ${tenant.recommendedShardCount} 个；请增加 Group 或用同机型 POC 证明可承载。`]);
@@ -3369,7 +3396,10 @@ function renderRisks(data) {
     }
   });
   if (data.growthFactor === 1 && data.years > 1) {
-    risks.push(["risk-mid", "规划年限大于 1 但增长系数为 1，请确认是否无需容量增长预留。"]);
+    risks.push(["risk-mid", "规划年限大于 1 但数据增长系数为 1，请确认是否无需容量增长预留。"]);
+  }
+  if (data.transactionGrowthFactor === 1 && data.years > 1) {
+    risks.push(["risk-mid", "规划年限大于 1 但交易峰值增长系数为 1，请确认是否无需性能增长预留。"]);
   }
   if (data.gtmBinding.kind === "shared" && data.distributedTenants > 1) {
     risks.push(["risk-mid", "多个分布式租户共享系统级 GTM 时，需评估 GTM 容量、隔离性和变更窗口。"]);
@@ -3510,10 +3540,11 @@ function renderFormula(data) {
   const evenNote = data.forceEven ? "，取偶数" : "";
   const text = [
     "CN 计算节点公式：",
-    `每 AZ CN = Max(2, ROUNDUP((QPS / T) / (K × 单台 CN 物理核数 × C)) × POWER(增长系数, 年限))${evenNote}`,
+    `每租户每 AZ CN = Max(2, ROUNDUP((QPS / T) × POWER(交易峰值年增长系数, 年限) / (K × 单台 CN 物理核数 × C)))${evenNote}`,
     `业务事务量 = ${data.qps} / ${data.sqlPerTxn} = ${round(data.businessTxnTps)} TPS`,
-    `单 CN 安全事务能力 = ${data.singleCoreTps} × ${data.cpuCores} × ${data.cpuLimit} = ${round(data.cnSingleNodeTps)} TPS`,
-    `基础 CN = ROUNDUP(${round(data.businessTxnTps)} / ${round(data.cnSingleNodeTps)}) × ${round(data.growthPower)} = ${round(data.cnRaw)}`,
+    `节点数量计算基准能力 = ${data.singleCoreTps} × ${data.cpuCores} × ${data.cpuLimit} = ${round(data.cnSingleNodeTps)} TPS；最终规格按各租户需求计算`,
+    `交易峰值增长倍数 = POWER(${data.transactionGrowthFactor}, ${data.years}) = ${round(data.transactionGrowthPower)}；基础 CN 合计 = SUM(ROUNDUP(各租户规划 TPS / ${round(data.cnSingleNodeTps)})) = ${round(data.cnRaw)}`,
+    ...data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} CN规格：${tenant.cnSpecReason}；单生产 AZ ${tenant.cnPerAz} × ${round(tenant.cnSafeTpsPerNode)} = ${round(tenant.cnSafeTpsPerAz)} TPS，目标 ${round(tenant.cnTargetTps)} TPS（线性规划，非实测）。`),
     `生产中心 CN = ${data.cnPerAz} / 单 AZ；各站点 = ${getAzNames(data.mode, data.azCount).map((az, index) => `${az}:${data.tenantPlans.reduce((sum, tenant) => sum + tenant.cnByAz[index], 0)}`).join("，")}；总计 ${data.totalCn}`,
     `CN 租户部署 = ${data.resourceReduction.cnTenantPlacementLabel}${data.resourceReduction.configuredCnTenantPlacement === "auto" ? "（环境自动）" : "（手工指定）"}`,
     "",
@@ -3522,7 +3553,7 @@ function renderFormula(data) {
     `容量维度分片 = SUM(ROUNDUP(租户规划数据量 / 单主分片 ${data.maxShardTb}TB)) = ${data.shardByCapacity}`,
     `DN 单核 TPS 工程值 = ${data.dnReferenceTps} / ${data.dnReferenceCores} = ${round(data.dnSingleCoreTps)} TPS/物理核`,
     `单主 DN 性能规划上限 = 当前标定 TPS = ${data.safeShardTps} TPS`,
-    `性能维度分片 = SUM(ROUNDUP(租户事务 TPS / 标定单主 DN ${data.safeShardTps}TPS)) = ${data.shardByTps}`,
+    `性能维度分片 = SUM(ROUNDUP(租户规划事务 TPS / 标定单主 DN ${data.safeShardTps}TPS)) = ${data.shardByTps}`,
     `推荐 Group = SUM(Max(容量分片, 性能分片))${evenNote}；手工调整低于推荐值时触发红线；当前 Group 合计 ${data.shardCount}`,
     `DN 标定点 = ${data.dnReferenceCores}物理核 / ${data.dnReferenceMemoryGb}GB / ${data.dnReferenceTps}TPS；性能分片与 DN 规格均引用该标定点`,
     ...data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} DN规格：${tenant.dnSpecFormula}；${tenant.dnSpecReason}`),
@@ -3701,7 +3732,7 @@ function getResourceReductionRedlines(data) {
   const gtmGroupPlacementAudit = data.reverse ? data.gtmGroupPlacementAudit : data.serverSizing.gtmGroupPlacementAudit;
   if (!data.reverse) {
     data.tenantPlans.filter((tenant) => tenant.cnBelowMinimum).forEach((tenant) => {
-      redlines.push(`${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 单 AZ CN=${tenant.cnPerAz}，低于性能建议 ${tenant.recommendedCnPerAz}；请增加 CN 或重新压测标定。`);
+      redlines.push(`${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 单 AZ CN=${tenant.cnPerAz}，安全能力 ${round(tenant.cnSafeTpsPerAz)}/${round(tenant.cnTargetTps)} TPS；性能或至少 2 个 CN 的冗余规则未通过。`);
     });
     data.tenantPlans.filter((tenant) => tenant.shardBelowMinimum).forEach((tenant) => {
       redlines.push(`${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} DN Group=${tenant.shardCount}，低于容量/TPS 水位建议 ${tenant.recommendedShardCount}；请增加 Group。`);
@@ -5127,7 +5158,7 @@ function buildExcelSheets(data) {
   const tenantHeaders = [
     "租户", "服务器策略", "形态", "QPS", "事务TPS", "CN/生产AZ", "CN自动建议", "CN手工",
     "各站点CN", "CN总数", "DN Group", "Group建议", "Group手工", "副本/Group", "DN实例",
-    "规划数据TB", "GTM绑定", "CN规格", "DN规格", "容量校验", "租户ID"
+    "规划数据TB", "GTM绑定", "CN规格", "DN规格", "容量校验", "租户ID", "规划事务TPS"
   ];
   const tenantRows = data.tenantPlans.map((tenant) => [
     tenant.name,
@@ -5150,14 +5181,15 @@ function buildExcelSheets(data) {
     tenant.cnSpecLabel || `${tenant.cnCores}C/${tenant.cnMemoryGb}GB`,
     tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`,
     tenant.cnBelowMinimum || tenant.shardBelowMinimum ? "未通过" : "通过",
-    tenant.tenantId
+    tenant.tenantId,
+    tenant.plannedTxnTps === undefined ? "未评估" : Number(round(tenant.plannedTxnTps))
   ]);
   const tenantSheet = buildExcelTableSheet({
     name: "租户资源",
     title: "租户 CN / DN / GTM 资源规划",
     headers: tenantHeaders,
     dataRows: tenantRows,
-    widths: [14, 24, 20, 14, 14, 14, 14, 10, 42, 12, 13, 13, 10, 13, 12, 14, 28, 18, 18, 14, 16],
+    widths: [14, 24, 20, 14, 14, 14, 14, 10, 42, 12, 13, 13, 10, 13, 12, 14, 28, 18, 18, 14, 16, 18],
     rowStyle(values, index, defaultStyles) {
       defaultStyles[1] = data.tenantPlans[index]?.deploymentStrategy === "dedicated" ? excelStyles.dedicatedServer : excelStyles.sharedServer;
       defaultStyles[19] = values[19] === "通过" ? excelStyles.pass : excelStyles.risk;
@@ -5301,7 +5333,16 @@ function excelColumnName(index) {
 }
 
 function xmlEscape(value) {
+  const error = xmlTextError(value, "导出文本");
+  if (error) throw new PlanningInputError(error);
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function excelTextEscape(value) {
+  // Protect literal ST_Xstring escapes before adding the CR escape ourselves.
+  return xmlEscape(String(value ?? "")
+    .replace(/_(?=x[0-9a-fA-F]{4}_)/g, "_x005F_")
+    .replace(/\r/g, "_x000D_"));
 }
 
 function buildWorksheetXml(sheet) {
@@ -5325,7 +5366,7 @@ function buildWorksheetXml(sheet) {
       const styleId = sheet.styles?.[rowIndex]?.[columnIndex] ?? excelStyles.default;
       const styleAttribute = styleId ? ` s="${styleId}"` : "";
       if (typeof value === "number" && Number.isFinite(value)) return `<c r="${ref}"${styleAttribute}><v>${value}</v></c>`;
-      return `<c r="${ref}" t="inlineStr"${styleAttribute}><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+      return `<c r="${ref}" t="inlineStr"${styleAttribute}><is><t xml:space="preserve">${excelTextEscape(value)}</t></is></c>`;
     }).join("");
     return `<row r="${rowNumber}"${rowAttributes}>${cells}</row>`;
   }).join("");
@@ -5428,6 +5469,7 @@ function downloadExcelPlan() {
   if (!data) return;
   const button = $("downloadExcelBtn");
   const originalLabel = button.textContent;
+  button.removeAttribute("title");
   button.disabled = true;
   button.dataset.busy = "true";
   button.textContent = "正在生成 Excel...";
@@ -5445,6 +5487,7 @@ function downloadExcelPlan() {
     button.textContent = "Excel 已下载";
   } catch (error) {
     console.error("Excel 生成失败", error);
+    button.title = error?.message || "Excel 生成失败";
     button.textContent = "生成失败，请重试";
   } finally {
     setTimeout(() => {
@@ -5726,7 +5769,7 @@ function bindParameterEvents() {
       render({ tenantEditors: false });
       return;
     }
-    if (event.target.matches("#maxShardTb, #dnReferenceCores, #dnReferenceMemoryGb, #dnReferenceTps, #growthFactor, #years, #forceEven, #sqlPerTxn, #singleCoreTps, #cpuCores, #cpuLimit")) {
+    if (event.target.matches("#maxShardTb, #dnReferenceCores, #dnReferenceMemoryGb, #dnReferenceTps, #growthFactor, #transactionGrowthFactor, #years, #forceEven, #sqlPerTxn, #singleCoreTps, #cpuCores, #cpuLimit")) {
       render();
       return;
     }
@@ -5851,7 +5894,8 @@ function calculateSuggestedMinShards(tenant) {
   const safeShardTps = Math.max(1, numberValue("dnReferenceTps"));
   const sqlPerTxn = Math.max(1, numberValue("sqlPerTxn"));
   const byCapacity = Math.ceil((dataTb * growthPower) / maxShardTb);
-  const byPerformance = Math.ceil((qps / sqlPerTxn) / safeShardTps);
+  const transactionGrowthPower = Math.pow(numberValue("transactionGrowthFactor"), numberValue("years"));
+  const byPerformance = Math.ceil((qps / sqlPerTxn) * transactionGrowthPower / safeShardTps);
   return maybeEven(Math.max(1, byCapacity, byPerformance), $("forceEven").checked);
 }
 
@@ -5861,8 +5905,8 @@ function calculateSuggestedCnPerAz(tenant) {
   const singleCoreTps = Math.max(1, numberValue("singleCoreTps"));
   const physicalCores = Math.max(1, numberValue("cpuCores"));
   const cpuLimit = Math.min(1, Math.max(0.1, numberValue("cpuLimit")));
-  const growthPower = Math.pow(numberValue("growthFactor"), numberValue("years"));
-  const raw = Math.ceil((qps / sqlPerTxn) / (singleCoreTps * physicalCores * cpuLimit)) * growthPower;
+  const transactionGrowthPower = Math.pow(numberValue("transactionGrowthFactor"), numberValue("years"));
+  const raw = Math.ceil((qps / sqlPerTxn) * transactionGrowthPower / (singleCoreTps * physicalCores * cpuLimit));
   return maybeEven(Math.max(2, raw), $("forceEven").checked);
 }
 
