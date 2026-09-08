@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs';
-const out = path.resolve('outputs/goldendb-remediation-20260906/b3b/evidence');
+const out = process.env.REMEDIATION_TEST_OUTPUT || path.resolve('outputs/goldendb-remediation-20260906/b3b/evidence');
 fs.mkdirSync(out, { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 const page = await browser.newPage();
@@ -20,7 +20,7 @@ try {
       const volume = 3 * dataGrowth ** years;
       return { dataGrowth, txnGrowth, years, pass: Math.abs(t.plannedTxnTps - target) < 1e-8
         && Math.abs(t.futureDataTb - volume) < 1e-8
-        && t.cnRaw === Math.ceil(target / 2240)
+        && t.cnRaw === Math.ceil(target / 1120)
         && t.shardByTps === Math.ceil(target / 2000)
         && t.shardByCapacity === Math.ceil(volume / 2)
         && t.cnPerAz === calculateSuggestedCnPerAz(businessTenantSpecs[0])

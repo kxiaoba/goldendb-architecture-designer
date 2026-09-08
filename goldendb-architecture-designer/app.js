@@ -583,7 +583,8 @@ function calculate() {
 
   const growthPower = Math.pow(growthFactor, years);
   const transactionGrowthPower = Math.pow(transactionGrowthFactor, years);
-  const cnSingleNodeTps = singleCoreTps * cpuCores * cpuLimit;
+  const cnPlanningCores = getCnFittingCores(componentSpecs.cn, reserveRatio, cpuCores);
+  const cnSingleNodeTps = singleCoreTps * cnPlanningCores * cpuLimit;
   const azCount = getAzCount(mode);
   const siteCapacityFactors = getSiteCapacityFactors(mode, drCapacityRatio);
   const managementNodes = integerValue("businessManagementNodes", 1);
@@ -594,7 +595,7 @@ function calculate() {
     sqlPerTxn,
     cnSingleNodeTps,
     singleCoreTps,
-    cpuCores,
+    cpuCores: cnPlanningCores,
     cpuLimit,
     growthPower,
     transactionGrowthPower,
@@ -673,6 +674,7 @@ function calculate() {
     sqlPerTxn,
     singleCoreTps,
     cpuCores,
+    cnPlanningCores,
     cpuLimit,
     years,
     growthFactor,
@@ -881,7 +883,7 @@ function calculateReverse() {
   const allowColocation = componentSizing.effectiveLayout !== "dedicated" && componentSizing.effectiveLayout !== "gtmMgrMixed";
   const requiredDedicatedServers = componentSizing.dedicatedServers;
   const requiredServerCount = componentSizing.recommendedServers;
-  const resourceState = getResourceState(serverCount, requiredServerCount, usableServerCount, environment);
+  let resourceState = getResourceState(serverCount, requiredServerCount, usableServerCount, environment);
   const serverPlan = buildServerPlan({
     serverCount,
     azCount,
@@ -918,6 +920,7 @@ function calculateReverse() {
   const gtmGroupPlacementAudit = getGtmGroupPlacementAudit(serverPlan, { tenantPlans, gtmNodes, gtmBinding, azCount });
   const capacityViolations = serverPlan.filter((server) => server.resourceAudit && !server.resourceAudit.withinWatermark);
   const dnCenterDistribution = getDnCenterDistribution(serverPlan, mode, azCount);
+  if (getDnPlacementIssues({ reverse: true, serverPlan, tenantPlans, mode, azCount }).length) resourceState = "不足";
   const scores = scoreReversePlan({
     environment,
     goal,
@@ -1111,6 +1114,39 @@ function getBusinessComponentSpecs(config) {
   }));
 }
 
+const dnPrimaryLabels = { balanced: "生产中心均衡", centerA: "主分片集中中心 A", centerB: "主分片集中中心 B" };
+
+function getDnReplicaAz(tenant, group, replica, config) {
+  const policy = tenant.primaryStrategy || "balanced";
+  if (!Object.hasOwn(dnPrimaryLabels, policy)) throw new PlanningInputError("租户主分布策略无效，请重新选择。");
+  const production = Array.from({ length: config.azCount }, (_, index) => index).filter(index => !isDisasterSite(config.mode, index));
+  const primary = policy === "centerA" ? 0 : policy === "centerB" ? 1 : production[(group - 1) % production.length];
+  if (primary >= config.azCount) throw new PlanningInputError("当前只有一个机房，不能选择中心 B 作为主中心；请修改租户主分布策略。");
+  return (primary + replica - 1) % config.azCount;
+}
+
+function renderPrimarySelector(tenant, index, mode) {
+  return `<label class="field compact-field"><span>正常运行主分布策略</span><select class="tenant-input" data-mode="${mode}" data-index="${index}" data-key="primaryStrategy">${Object.entries(dnPrimaryLabels).map(([key, label]) => `<option value="${key}" ${(tenant.primaryStrategy || "balanced") === key ? "selected" : ""}>${label}</option>`).join("")}</select></label>`;
+}
+
+function getDnPlacementIssues(data) {
+  const servers = getPlanServers(data);
+  const issues = [];
+  data.tenantPlans.forEach(tenant => {
+    let missing = 0, wrongSite = 0;
+    for (let group = 1; group <= tenant.shardCount; group++) {
+      for (let replica = 1; replica <= tenant.replicasPerShard; replica++) {
+        const role = `${getTenantKey(tenant)}-DN-G${group}-${replica === 1 ? "Master" : `Slave${replica - 1}`}`;
+        const hosts = servers.filter(server => server.roles.includes(role));
+        if (hosts.length !== 1) missing++;
+        else if (hosts[0].azIndex !== getDnReplicaAz(tenant, group, replica, data)) wrongSite++;
+      }
+    }
+    if (missing || wrongSite) issues.push(`${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} DN 副本未完整落位或重复 ${missing} 个、目标中心不符 ${wrongSite} 个；请增加目标中心可用资源或调整分片/副本，不能跨中心兜底。`);
+  });
+  return issues;
+}
+
 function buildBusinessSiteDemands(config) {
   const sites = Array.from({ length: config.azCount }, (_, azIndex) => ({
     azIndex,
@@ -1130,7 +1166,7 @@ function buildBusinessSiteDemands(config) {
     });
     for (let group = 1; group <= tenant.shardCount; group += 1) {
       for (let replica = 1; replica <= tenant.replicasPerShard; replica += 1) {
-        const azIndex = (group + replica - 2) % config.azCount;
+        const azIndex = getDnReplicaAz(tenant, group, replica, config);
         const demand = sites[azIndex].dn;
         demand.instances += 1;
         demand.cpuCores += tenant.dnCores;
@@ -1170,7 +1206,7 @@ function buildBusinessSiteDemands(config) {
       for (let group = 1; group <= tenant.shardCount; group += 1) {
         let sameGroup = 0;
         for (let replica = 1; replica <= tenant.replicasPerShard; replica += 1) {
-          if ((group + replica - 2) % config.azCount === site.azIndex) {
+          if (getDnReplicaAz(tenant, group, replica, config) === site.azIndex) {
             count += 1;
             sameGroup += 1;
           }
@@ -2036,9 +2072,9 @@ function placeDnRolesByPool(servers, config) {
     for (let group = 1; group <= tenant.shardCount; group += 1) {
       for (let replica = 1; replica <= tenant.replicasPerShard; replica += 1) {
         const role = replica === 1 ? "Master" : `Slave${replica - 1}`;
-        const azIndex = (group + replica - 2) % config.azCount;
+        const azIndex = getDnReplicaAz(tenant, group, replica, config);
         const tenantPool = getTenantResourcePoolKey(tenant);
-        const candidates = servers.filter((server) => server.componentKeys.includes("dn") && server.tenantPool === tenantPool);
+        const candidates = servers.filter((server) => server.componentKeys.includes("dn") && server.tenantPool === tenantPool && server.azIndex === azIndex);
         const withoutSameGroup = candidates.filter((server) => !hasDnGroupRole(server, getTenantKey(tenant), group));
         const comparePlacement = (a, b) => {
           const azDelta = Number(b.azIndex === azIndex) - Number(a.azIndex === azIndex);
@@ -2071,13 +2107,7 @@ function placeDnRolesByPool(servers, config) {
               || getServerDnTenants(server).every((name) => name === getTenantKey(tenant)))
           )
           .sort(comparePlacement);
-        const capacityFallback = withoutSameGroup
-          .filter((server) => server.dnCount < config.maxDnPerServer)
-          .sort(comparePlacement);
-        const target = eligible[0]
-          || capacityFallback[0]
-          || withoutSameGroup.sort(comparePlacement)[0]
-          || candidates.sort(comparePlacement)[0];
+        const target = eligible[0];
         if (!target) continue;
         target.roles.push(roleName);
         target.dnCount += 1;
@@ -2656,6 +2686,7 @@ function buildBusinessTenantPlans(data) {
       tenantNo,
       tenantId: spec.tenantId,
       name: normalizeTenantName(spec.name, tenantNo),
+      primaryStrategy: spec.primaryStrategy || "balanced",
       deploymentStrategy,
       deploymentStrategyLabel: tenantDeploymentStrategyLabels[deploymentStrategy],
       isDistributed,
@@ -2737,6 +2768,7 @@ function buildReverseTenantPlans(data) {
       tenantNo,
       tenantId: spec.tenantId,
       name: normalizeTenantName(spec.name, tenantNo),
+      primaryStrategy: spec.primaryStrategy || "balanced",
       deploymentStrategy,
       deploymentStrategyLabel: tenantDeploymentStrategyLabels[deploymentStrategy],
       isDistributed,
@@ -2766,6 +2798,12 @@ function buildReverseTenantPlans(data) {
   });
   assertPlanningScale(plans.reduce((sum, tenant) => sum + tenant.totalCn + tenant.dnInstances, 0), "instances");
   return plans;
+}
+
+function getCnFittingCores(spec, reserveRatio, requestedCores) {
+  const limit = Math.floor(Math.min(requestedCores, spec.cores * (1 - reserveRatio), spec.memoryGb * (1 - reserveRatio) / 2));
+  if (limit < 1) throw new PlanningInputError("CN 服务器扣除预留后不足 1 物理核或 2GB 内存，无法放入 CN 实例；请调整机型或预留。");
+  return [64, 32, 16, 8].find((cores) => cores <= limit) || limit;
 }
 
 function recommendCnNodeSpec(data) {
@@ -3028,6 +3066,7 @@ function renderBusinessTenantEditor() {
         </select>
         <small>独立模式使用专属物理服务器资源池；共享模式仍受水位、反亲和和组件混部规则约束。</small>
       </label>
+      ${renderPrimarySelector(tenant, index, "business")}
       <div class="grid-two">
         <label class="field compact-field">
           <span>租户形态</span>
@@ -3093,6 +3132,7 @@ function renderReverseTenantEditor() {
         </select>
         <small>独立模式仍计入客户服务器总量，并进行资源池容量红线检查。</small>
       </label>
+      ${renderPrimarySelector(tenant, index, "reverse")}
       <div class="grid-two">
         <label class="field compact-field">
           <span>租户形态</span>
@@ -3280,7 +3320,7 @@ function getDisasterText(mode) {
 }
 
 function renderRisks(data) {
-  const risks = [];
+  const risks = getDnPlacementIssues(data).map(issue => ["risk-high", issue]);
   if (data.reverse) {
     if (data.mode === "local1az" && data.environment === "production") {
       risks.push(["risk-high", "生产环境选择了本地单机房模式，无法覆盖机房级故障，核心业务不建议采用。"]);
@@ -3542,7 +3582,7 @@ function renderFormula(data) {
     "CN 计算节点公式：",
     `每租户每 AZ CN = Max(2, ROUNDUP((QPS / T) × POWER(交易峰值年增长系数, 年限) / (K × 单台 CN 物理核数 × C)))${evenNote}`,
     `业务事务量 = ${data.qps} / ${data.sqlPerTxn} = ${round(data.businessTxnTps)} TPS`,
-    `节点数量计算基准能力 = ${data.singleCoreTps} × ${data.cpuCores} × ${data.cpuLimit} = ${round(data.cnSingleNodeTps)} TPS；最终规格按各租户需求计算`,
+    `可装入单 CN 核数 = ${data.cnPlanningCores}（输入上限 ${data.cpuCores}，同时受宿主机 CPU/内存预留约束）；基准安全能力 = ${data.singleCoreTps} × ${data.cnPlanningCores} × ${data.cpuLimit} = ${round(data.cnSingleNodeTps)} TPS`,
     `交易峰值增长倍数 = POWER(${data.transactionGrowthFactor}, ${data.years}) = ${round(data.transactionGrowthPower)}；基础 CN 合计 = SUM(ROUNDUP(各租户规划 TPS / ${round(data.cnSingleNodeTps)})) = ${round(data.cnRaw)}`,
     ...data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} CN规格：${tenant.cnSpecReason}；单生产 AZ ${tenant.cnPerAz} × ${round(tenant.cnSafeTpsPerNode)} = ${round(tenant.cnSafeTpsPerAz)} TPS，目标 ${round(tenant.cnTargetTps)} TPS（线性规划，非实测）。`),
     `生产中心 CN = ${data.cnPerAz} / 单 AZ；各站点 = ${getAzNames(data.mode, data.azCount).map((az, index) => `${az}:${data.tenantPlans.reduce((sum, tenant) => sum + tenant.cnByAz[index], 0)}`).join("，")}；总计 ${data.totalCn}`,
@@ -3555,6 +3595,7 @@ function renderFormula(data) {
     `单主 DN 性能规划上限 = 当前标定 TPS = ${data.safeShardTps} TPS`,
     `性能维度分片 = SUM(ROUNDUP(租户规划事务 TPS / 标定单主 DN ${data.safeShardTps}TPS)) = ${data.shardByTps}`,
     `推荐 Group = SUM(Max(容量分片, 性能分片))${evenNote}；手工调整低于推荐值时触发红线；当前 Group 合计 ${data.shardCount}`,
+    ...data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)}：容量 ${tenant.shardByCapacity} Group，性能 ${tenant.shardByTps} Group，${data.forceEven ? "应用取偶策略" : "不取偶"}后建议 ${tenant.recommendedShardCount} Group；当前 ${tenant.shardCount} Group × ${tenant.replicasPerShard} 副本 = ${tenant.dnInstances} DN 实例（不是服务器台数）。`),
     `DN 标定点 = ${data.dnReferenceCores}物理核 / ${data.dnReferenceMemoryGb}GB / ${data.dnReferenceTps}TPS；性能分片与 DN 规格均引用该标定点`,
     ...data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} DN规格：${tenant.dnSpecFormula}；${tenant.dnSpecReason}`),
     `说明：官方指南按总 TPS/QPS 与单节点经验性能、数据量共同确定分片数。页面的单核线性折算仅用于规格初算；SQL 复杂度、热点、日志同步、存储延迟会破坏线性关系，生产必须 POC 校准。`,
@@ -3718,7 +3759,7 @@ function getSelectedReductionMeasures(reduction) {
 }
 
 function getResourceReductionRedlines(data) {
-  const redlines = [];
+  const redlines = getDnPlacementIssues(data);
   const sizing = data.reverse ? data : data.serverSizing;
   const dnViolations = data.reverse ? data.dnReplicaHostViolations : data.serverSizing.dnReplicaHostViolations;
   const gtmViolations = data.reverse ? data.gtmReplicaHostViolations : data.serverSizing.gtmReplicaHostViolations;
@@ -4062,7 +4103,8 @@ function renderPptNetworkPlan(data) {
   }).join("");
 
   return `
-    ${renderTopologyOverview(data)}
+    <div class="cn-plan-overview">${renderTopologyOverview(data)}</div>
+    ${renderCnPlacementSummary(data)}
     <div class="ppt-network-board" style="--site-count:${data.azCount}">
       <div class="ppt-workload-row">
         <strong>业务系统</strong>
@@ -4105,7 +4147,7 @@ function renderPptLogicalServer(server, data) {
   return `
     <article class="ppt-logical-server ${server.roles.length ? "" : "reserve"}">
       <div class="ppt-server-head"><strong>${escapeAttr(server.id)}</strong><span>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")} · ${escapeAttr(server.rack || server.az)}</span></div>
-      ${tenantGroups}${systemGroup || (!tenantGroups ? `<p>故障接管 / 扩容预留</p>` : "")}
+      ${tenantGroups}${systemGroup || (!tenantGroups ? `<p>${server.componentKeys?.includes("cn") && !(data.reverse ? data.cnPlacementAudit : data.serverSizing.cnPlacementAudit)?.complete ? "CN 未落位：请检查机型、水位与隔离约束" : "故障接管 / 扩容预留"}</p>` : "")}
     </article>
   `;
 }
@@ -4122,6 +4164,7 @@ function renderPptServerTopology(data) {
   const servers = getPlanServers(data);
   const azNames = getAzNames(data.mode, data.azCount);
   return `
+    ${renderCnPlacementSummary(data)}
     <div class="physical-topology-board" style="--site-count:${data.azCount}">
       <div class="physical-site-grid">
         ${azNames.map((az, azIndex) => {
@@ -4149,19 +4192,21 @@ function renderPptServerTopology(data) {
 
 function renderPhysicalServer(server, data) {
   const spec = server.spec;
+  const cnUnplaced = !server.roles.length && server.componentKeys?.includes("cn")
+    && !(data.reverse ? data.cnPlacementAudit : data.serverSizing.cnPlacementAudit)?.complete;
   const specText = spec
     ? `${spec.model} · ${spec.sockets}路/${spec.cores}物理核 · ${spec.memoryGb}GB · 数据盘${spec.dataDiskTb}TB×${spec.dataDiskCount}`
     : `${data.cpuCores || "-"}核 · ${data.memoryGb || "-"}GB · ${data.diskTb || "-"}TB`;
   return `
-    <article class="physical-server ${server.roles.length ? "" : "reserve"}">
+    <article class="physical-server ${cnUnplaced ? "placement-error" : server.roles.length ? "" : "reserve"}">
       <div class="server-chassis" aria-hidden="true"><i></i><i></i><i></i></div>
       <div class="physical-server-info">
         <div><strong>${escapeAttr(server.id)}</strong><span>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")} / ${escapeAttr(server.hostGroup || "通用资源池")}</span></div>
-        <p>${escapeAttr(summarizeServerRoles(server.roles))}</p>
+        <p>${cnUnplaced ? "CN 未落位" : escapeAttr(summarizeServerRoles(server.roles))}</p>
         ${renderServerCnTenantMap(server.roles)}
         ${renderServerDnGroupMap(server.roles)}
         ${renderServerGtmGroupMap(server.roles)}
-        <small>${escapeAttr(renderServerRoleDetail(server.roles))}</small>
+        <small>${cnUnplaced ? "请检查机型、水位与隔离约束；不可作为接管能力" : escapeAttr(renderServerRoleDetail(server.roles))}</small>
         <em>${escapeAttr(specText)}</em>
       </div>
     </article>
@@ -4576,6 +4621,16 @@ function renderServerRoleDetail(roles) {
   const visible = displayRoles(roles.slice(0, 4)).join(" / ");
   const hidden = roles.length > 4 ? ` / +${roles.length - 4} 项` : "";
   return `${visible}${hidden}`;
+}
+
+function renderCnPlacementSummary(data) {
+  const servers = getPlanServers(data);
+  return `<div class="cn-placement-summary">${getAzNames(data.mode, data.azCount).map((az, index) => {
+    const hosts = servers.filter((server) => server.az === az && server.roles.some(isCnRole));
+    const actual = hosts.reduce((sum, server) => sum + server.roles.filter(isCnRole).length, 0);
+    const expected = data.tenantPlans.reduce((sum, tenant) => sum + (tenant.cnByAz?.[index] ?? tenant.cnPerAz), 0);
+    return `<div class="${actual === expected ? "cn-placement-ok" : "cn-placement-error"}"><strong>${escapeAttr(az)}</strong> CN 实例 ${actual}/${expected} · CN 承载服务器 ${hosts.length} 台${actual !== expected ? ` · 未落位 ${Math.max(0, expected - actual)}` : ""}</div>`;
+  }).join("")}${data.tenantPlans.map(tenant => `<div><strong>${escapeAttr(displayTenantKey(getTenantKey(tenant), data.tenantPlans))}</strong> · ${dnPrimaryLabels[tenant.primaryStrategy || "balanced"]} · ${tenant.shardCount} 分片 × ${tenant.replicasPerShard} 副本 = ${tenant.dnInstances} DN 实例 · 实际承载 ${servers.filter(server => server.roles.some(role => isDnRole(role) && role.startsWith(`${getTenantKey(tenant)}-`))).length} 台服务器</div>`).join("")}${getDnPlacementIssues(data).map(issue => `<div class="cn-placement-error">${escapeAttr(issue)}</div>`).join("")}</div>`;
 }
 
 function renderTopologyOverview(data) {
@@ -5158,7 +5213,7 @@ function buildExcelSheets(data) {
   const tenantHeaders = [
     "租户", "服务器策略", "形态", "QPS", "事务TPS", "CN/生产AZ", "CN自动建议", "CN手工",
     "各站点CN", "CN总数", "DN Group", "Group建议", "Group手工", "副本/Group", "DN实例",
-    "规划数据TB", "GTM绑定", "CN规格", "DN规格", "容量校验", "租户ID", "规划事务TPS"
+    "规划数据TB", "GTM绑定", "CN规格", "DN规格", "容量校验", "租户ID", "规划事务TPS", "主分布策略"
   ];
   const tenantRows = data.tenantPlans.map((tenant) => [
     tenant.name,
@@ -5182,14 +5237,15 @@ function buildExcelSheets(data) {
     tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`,
     tenant.cnBelowMinimum || tenant.shardBelowMinimum ? "未通过" : "通过",
     tenant.tenantId,
-    tenant.plannedTxnTps === undefined ? "未评估" : Number(round(tenant.plannedTxnTps))
+    tenant.plannedTxnTps === undefined ? "未评估" : Number(round(tenant.plannedTxnTps)),
+    dnPrimaryLabels[tenant.primaryStrategy || "balanced"]
   ]);
   const tenantSheet = buildExcelTableSheet({
     name: "租户资源",
     title: "租户 CN / DN / GTM 资源规划",
     headers: tenantHeaders,
     dataRows: tenantRows,
-    widths: [14, 24, 20, 14, 14, 14, 14, 10, 42, 12, 13, 13, 10, 13, 12, 14, 28, 18, 18, 14, 16, 18],
+    widths: [14, 24, 20, 14, 14, 14, 14, 10, 42, 12, 13, 13, 10, 13, 12, 14, 28, 18, 18, 14, 16, 18, 24],
     rowStyle(values, index, defaultStyles) {
       defaultStyles[1] = data.tenantPlans[index]?.deploymentStrategy === "dedicated" ? excelStyles.dedicatedServer : excelStyles.sharedServer;
       defaultStyles[19] = values[19] === "通过" ? excelStyles.pass : excelStyles.risk;
@@ -5903,7 +5959,8 @@ function calculateSuggestedCnPerAz(tenant) {
   const qps = Math.max(1, Number(tenant.qps) || 1);
   const sqlPerTxn = Math.max(1, numberValue("sqlPerTxn"));
   const singleCoreTps = Math.max(1, numberValue("singleCoreTps"));
-  const physicalCores = Math.max(1, numberValue("cpuCores"));
+  const specs = getBusinessComponentSpecs({ serverConfigMode: $("businessServerConfigMode").value, cpuCores: numberValue("cpuCores"), serverProfile: $("businessServerProfile").value });
+  const physicalCores = getCnFittingCores(specs.cn, numberValue("businessReserveRatio"), numberValue("cpuCores"));
   const cpuLimit = Math.min(1, Math.max(0.1, numberValue("cpuLimit")));
   const transactionGrowthPower = Math.pow(numberValue("transactionGrowthFactor"), numberValue("years"));
   const raw = Math.ceil((qps / sqlPerTxn) * transactionGrowthPower / (singleCoreTps * physicalCores * cpuLimit));

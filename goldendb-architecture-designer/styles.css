@@ -2089,7 +2089,13 @@ a {
   overflow-wrap: anywhere;
 }
 
-.ppt-role-pill.cn { border-color: var(--teal); }
+.ppt-role-pill.cn { border-color: var(--teal); background: #123d36; color: #edfff9; font-weight: 700; }
+.cn-placement-summary { display: grid; gap: 8px; margin: 12px 0; font-size: 14px; overflow-wrap: anywhere; }
+.cn-placement-summary > div { padding: 8px; border-left: 3px solid var(--teal); }
+.cn-placement-summary .cn-placement-error { border-color: #ff6470; color: #ff8891; background: #32181c; }
+.physical-server.placement-error { border-color: #ff6470; }
+.cn-plan-overview .topology-ribbon { position: static; padding: 12px 14px 0; }
+.cn-placement-summary + .ppt-network-board { padding-top: 14px; }
 .ppt-role-pill.dn { border-color: var(--accent); }
 .ppt-role-pill.gtm { border-color: var(--warn); }
 .ppt-role-pill.management { border-color: var(--blue); }
