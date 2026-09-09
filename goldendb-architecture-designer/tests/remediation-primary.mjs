@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs';
-const out = path.resolve('outputs/goldendb-remediation-20260906/b4a/evidence');
+const out = path.resolve(process.env.REMEDIATION_TEST_OUTPUT || 'outputs/goldendb-remediation-20260906/b4a/evidence');
 fs.mkdirSync(out,{recursive:true});
 const browser = await chromium.launch({channel:'chrome',headless:true});
 const page = await browser.newPage({viewport:{width:1600,height:1000}});
@@ -19,7 +19,7 @@ try {
     const correct=masters.every(({r,az})=>az === getDnReplicaAz(t,parseDnPlacementRole(r).group,1,d));
     const audit=getDnPlacementIssues(d);
     const demandMatches = module==='reverse' || d.serverSizing.siteComponentDemands.every(site => servers.filter(s=>s.azIndex===site.azIndex).reduce((sum,s)=>sum+s.roles.filter(isDnRole).length,0)===site.dn.instances);
-    return {module,policy,masters,audit,demandMatches,pass:correct && demandMatches && masters.every(m=>!isDisasterSite(d.mode,m.az)) && (module==='reverse' || audit.length===0)};
+    return {module,policy,masters,audit,demandMatches,pass:correct && demandMatches && masters.every(m=>!isDisasterSite(d.mode,m.az)) && (module==='reverse' ? (!audit.length || d.resourceState==='不足') : audit.length===0)};
    },{module,policy}));
   }
   results.push(await page.evaluate(()=>{
@@ -53,7 +53,7 @@ try {
   resetForm(); const base=businessTenantSpecs[0];
   businessTenantSpecs=['centerA','centerB','balanced'].map((primaryStrategy,i)=>({...base,tenantId:createTenantIdentity(),name:`共享${i}`,primaryStrategy}));
   render(); const d=latestDesignData, issues=getDnPlacementIssues(d);
-  return {name:'shared-pool-strict-failure-report',issues,pass:issues.length>0 && getResourceReductionRedlines(d).some(s=>s.includes('DN 副本未完整'))
+  return {name:'shared-pool-isolated-tenants-complete',issues,pass:issues.length===0
    && getPlanServers(d).every(s=>!s.roles.some(isDnRole) || s.resourceAudit.withinWatermark)};
  }));
  results.push(await page.evaluate(()=>{

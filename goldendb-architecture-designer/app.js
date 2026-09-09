@@ -2069,10 +2069,24 @@ function getCnPlacementAudit(serverPlan, tenantPlans, azCount) {
 
 function placeDnRolesByPool(servers, config) {
   config.tenantPlans.forEach((tenant) => {
+    const placements = [];
+    const groupSiteCounts = new Map();
     for (let group = 1; group <= tenant.shardCount; group += 1) {
       for (let replica = 1; replica <= tenant.replicasPerShard; replica += 1) {
-        const role = replica === 1 ? "Master" : `Slave${replica - 1}`;
         const azIndex = getDnReplicaAz(tenant, group, replica, config);
+        const key = `${azIndex}:${group}`;
+        groupSiteCounts.set(key, (groupSiteCounts.get(key) || 0) + 1);
+        placements.push({ group, replica, azIndex, key });
+      }
+    }
+    // Place groups needing more distinct local hosts before filling their remaining slots.
+    if (config.allowShardColocation && config.dnTenantPlacement === "isolated") {
+      placements.sort((a, b) => a.azIndex - b.azIndex
+        || groupSiteCounts.get(b.key) - groupSiteCounts.get(a.key)
+        || a.group - b.group || a.replica - b.replica);
+    }
+    for (const { group, replica, azIndex } of placements) {
+        const role = replica === 1 ? "Master" : `Slave${replica - 1}`;
         const tenantPool = getTenantResourcePoolKey(tenant);
         const candidates = servers.filter((server) => server.componentKeys.includes("dn") && server.tenantPool === tenantPool && server.azIndex === azIndex);
         const withoutSameGroup = candidates.filter((server) => !hasDnGroupRole(server, getTenantKey(tenant), group));
@@ -2088,6 +2102,11 @@ function placeDnRolesByPool(servers, config) {
             if (crossTenantDelta) return crossTenantDelta;
           }
           if (config.allowShardColocation) {
+            // Reuse an isolated tenant's hosts before claiming empty shared-pool hosts.
+            // Eligibility still enforces replica anti-affinity, density and watermarks.
+            if (config.dnTenantPlacement === "isolated" && aTenantDn !== bTenantDn) {
+              return bTenantDn - aTenantDn;
+            }
             if (config.environment === "production" && aTenantDn !== bTenantDn) {
               return aTenantDn - bTenantDn;
             }
@@ -2111,7 +2130,6 @@ function placeDnRolesByPool(servers, config) {
         if (!target) continue;
         target.roles.push(roleName);
         target.dnCount += 1;
-      }
     }
   });
 }
