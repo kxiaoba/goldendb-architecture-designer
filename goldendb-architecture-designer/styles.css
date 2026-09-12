@@ -174,6 +174,11 @@ h3 {
   margin-bottom: 12px;
 }
 
+.workload-settings { min-width: 0; border-block: 1px solid var(--line); padding: 12px 0; margin-bottom: 12px; }
+.workload-settings h4 { font-size: 13px; margin: 10px 0; }
+.role-spec { display: block; white-space: normal; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; font-weight: 400; }
+.physical-instance-specs small { display: block; overflow-wrap: anywhere; line-height: 1.5; }
+
 .field span,
 .section-label {
   color: var(--muted);
@@ -2090,6 +2095,9 @@ a {
 }
 
 .ppt-role-pill.cn { border-color: var(--teal); background: #123d36; color: #edfff9; font-weight: 700; }
+.ppt-role-pill.cn,
+.ppt-role-pill.dn,
+.ppt-dn-group-token { flex-direction: column; align-items: flex-start; max-width: 100%; }
 .cn-placement-summary { display: grid; gap: 8px; margin: 12px 0; font-size: 14px; overflow-wrap: anywhere; }
 .cn-placement-summary > div { padding: 8px; border-left: 3px solid var(--teal); }
 .cn-placement-summary .cn-placement-error { border-color: #ff6470; color: #ff8891; background: #32181c; }

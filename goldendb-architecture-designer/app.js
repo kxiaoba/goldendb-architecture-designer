@@ -352,7 +352,7 @@ function invalidatePlanningResult(messages) {
   const message = `参数未通过，当前方案已失效。${messages.join("；")}`;
   $("planningInputStatus").hidden = false;
   $("planningInputStatus").textContent = message;
-  ["topology", "serverTopology", "relationGraph", "formulaOutput", "businessServerPlan", "reversePlan", "reductionPlan", "haGuide"].forEach((id) => { $(id).textContent = "参数未通过，暂无有效方案。"; });
+  ["topology", "serverTopology", "relationGraph", "formulaOutput", "placementDetails", "businessServerPlan", "reversePlan", "reductionPlan", "haGuide"].forEach((id) => { $(id).textContent = "参数未通过，暂无有效方案。"; });
   $("nodePlan").replaceChildren();
   const risk = document.createElement("li");
   risk.className = "risk-high";
@@ -412,6 +412,12 @@ function displayTenantKey(key, tenants = latestDesignData?.tenantPlans || []) {
 
 function displayRole(role, tenants = latestDesignData?.tenantPlans || []) {
   const match = /^(TID\d+)(-(?:CN\d+|DN-G\d+(?:-(?:Master|Slave\d*|M|S\d*))?|GTM\d*))$/.exec(role);
+  const cn = /^(TID\d+)-CN(\d+)$/.exec(role);
+  if (cn) {
+    const tenant = tenants.find(t=>getTenantKey(t)===cn[1]);
+    const item = tenant?.cnRoleSpecs?.[Number(cn[2])-1];
+    if (item && tenant.workloadMode === "split") return `${displayTenantKey(cn[1],tenants)}-${item.label}-CN${cn[2]}`;
+  }
   return match ? `${displayTenantKey(match[1], tenants)}${match[2]}` : role;
 }
 
@@ -475,7 +481,9 @@ function getResourceReductionConfig(prefix, environment, maxDnPerServer) {
   const allowGtmManagementMixed = $(`${prefix}AllowGtmManagementMixed`).checked;
   const allowGtmGroupColocation = $(`${prefix}AllowGtmGroupColocation`).checked;
   const allowAllMixed = $(`${prefix}AllowAllMixed`).checked;
-  const configuredTenantLimit = allowShardColocation ? integerValue(`${prefix}MaxTenantDnPerServer`, 1) : 1;
+  const densityEnabled = environment !== "poc" || $(`${prefix}DensityEnabled`).checked;
+  const configuredTenantLimit = allowShardColocation
+    ? (densityEnabled ? integerValue(`${prefix}MaxTenantDnPerServer`, 1) : planningLimits.instances) : 1;
   let requestedComponentLayout = "dedicated";
   let requestedGtmAffinity = "dedicated";
   if (allowAllMixed) {
@@ -511,6 +519,9 @@ function getResourceReductionConfig(prefix, environment, maxDnPerServer) {
     configuredTenantLimit,
     maxDnPerServer,
     maxTenantDnPerServer: effectiveTenantLimit,
+    maxTenantCnPerServer: environment === "production" ? 1
+      : densityEnabled ? (integerValue(`${prefix}PocTenantCnLimit`, 0) || planningLimits.instances) : planningLimits.instances,
+    densityEnabled,
     densityCapped: allowShardColocation && configuredTenantLimit > maxDnPerServer,
     productionMaximumRedline,
     note: productionMaximumRedline
@@ -737,8 +748,8 @@ function calculateReverse() {
   const memoryGb = numberValue("reverseMemoryGb");
   const diskTb = numberValue("reverseDiskTb");
   const reserveRatio = Math.min(0.8, Math.max(0, numberValue("reverseReserveRatio")));
-  const maxDnPerServer = integerValue("reverseMaxDnPerServer", 1);
-  const maxCnPerServer = integerValue("reverseMaxCnPerServer", 1);
+  const maxDnPerServer = getPocInstanceLimit("reverse", "dn", integerValue("reverseMaxDnPerServer", 1));
+  const maxCnPerServer = getPocInstanceLimit("reverse", "cn", integerValue("reverseMaxCnPerServer", 1));
   const azCount = getAzCount(mode);
   const minReplica = getMinimumReplicaCount(environment, mode);
   const tenantPlans = buildReverseTenantPlans({
@@ -876,13 +887,29 @@ function calculateReverse() {
       componentDemands: poolDemands,
       reserveRatio
     });
-    return { ...pool, componentDemands: poolDemands, sizing };
+    // Reuse the same replica target function as actual placement, but retain reverse CN counts.
+    const siteComponentDemands = buildBusinessSiteDemands({
+      mode, azCount, environment, resourceReduction, componentSpecs: reverseComponentSpecs,
+      siteCapacityFactors: Array(azCount).fill(1),
+      tenantPlans: pool.tenantPlans.map(tenant => ({ ...tenant, cnByAz: Array(azCount).fill(tenant.cnPerAz) })),
+      managementNodes: pool.managementNodes, gtmPlacements: pool.gtmPlacements
+    });
+    const siteSizing = siteComponentDemands.map(componentDemands => calculateComponentServerCounts({
+      environment, effectiveLayout: effectiveReverseLayout, layoutResolution: reverseLayoutResolution,
+      azCount: 1, componentSpecs: reverseComponentSpecs, componentDemands, reserveRatio
+    }));
+    return { ...pool, componentDemands: poolDemands, siteComponentDemands, siteSizing,
+      sizing: aggregateSiteComponentSizing(sizing, siteSizing) };
   });
   const componentSizing = aggregateSiteComponentSizing(baseComponentSizing, poolSizings.map((pool) => pool.sizing));
   componentSizing.poolSizings = poolSizings;
   const allowColocation = componentSizing.effectiveLayout !== "dedicated" && componentSizing.effectiveLayout !== "gtmMgrMixed";
   const requiredDedicatedServers = componentSizing.dedicatedServers;
-  const requiredServerCount = componentSizing.recommendedServers;
+  const siteHostRequirements = Array.from({ length: azCount }, (_, azIndex) =>
+    poolSizings.reduce((sum, pool) => sum + pool.siteSizing[azIndex].recommendedServers, 0));
+  // The current reverse inventory assigns host i to AZ i % azCount. Invert that contract.
+  const requiredServerCount = Math.max(componentSizing.recommendedServers,
+    ...siteHostRequirements.map((count, index) => count ? (count - 1) * azCount + index + 1 : 0));
   let resourceState = getResourceState(serverCount, requiredServerCount, usableServerCount, environment);
   const serverPlan = buildServerPlan({
     serverCount,
@@ -903,12 +930,20 @@ function calculateReverse() {
     maxDnPerServer,
     maxCnPerServer,
     maxTenantDnPerServer: resourceReduction.maxTenantDnPerServer,
+    maxTenantCnPerServer: resourceReduction.maxTenantCnPerServer,
     allowShardColocation: resourceReduction.allowShardColocation,
     allowGtmGroupColocation: resourceReduction.allowGtmGroupColocation,
     cnTenantPlacement: resourceReduction.cnTenantPlacement,
     dnTenantPlacement: resourceReduction.dnTenantPlacement
   });
   const cnTenantIsolationViolations = getCnTenantIsolationViolations(serverPlan, resourceReduction.cnTenantPlacement);
+  const centerQuotaAudit = siteHostRequirements.map((required, azIndex) => {
+    const local = serverPlan.filter(server => server.azIndex === azIndex);
+    const assigned = local.filter(server => server.componentKeys.length > 0).length;
+    return { azIndex, az: getAzNames(mode, azCount)[azIndex], required, available: local.length,
+      assigned, missing: Math.max(0, required - assigned) };
+  });
+  if (centerQuotaAudit.some(site => site.missing)) resourceState = "不足";
   const cnSameTenantHostViolations = getCnSameTenantHostViolations(serverPlan);
   const cnPlacementAudit = getCnPlacementAudit(serverPlan, tenantPlans, azCount);
   const dnTenantIsolationViolations = getDnTenantIsolationViolations(serverPlan, resourceReduction.dnTenantPlacement);
@@ -920,6 +955,7 @@ function calculateReverse() {
   const gtmGroupPlacementAudit = getGtmGroupPlacementAudit(serverPlan, { tenantPlans, gtmNodes, gtmBinding, azCount });
   const capacityViolations = serverPlan.filter((server) => server.resourceAudit && !server.resourceAudit.withinWatermark);
   const dnCenterDistribution = getDnCenterDistribution(serverPlan, mode, azCount);
+  if (!cnPlacementAudit.complete || !controlPlaneAudit.complete || capacityViolations.length) resourceState = "不足";
   if (getDnPlacementIssues({ reverse: true, serverPlan, tenantPlans, mode, azCount }).length) resourceState = "不足";
   const scores = scoreReversePlan({
     environment,
@@ -954,6 +990,7 @@ function calculateReverse() {
     gtmAffinity: componentSizing.gtmAffinity,
     gtmAffinityLabel: componentSizing.gtmAffinityLabel,
     componentSizing,
+    centerQuotaAudit,
     maxDnPerServer,
     maxCnPerServer,
     resourceReduction,
@@ -1063,7 +1100,7 @@ const componentOsLabels = {
 
 function getBusinessComponentSpecs(config) {
   const profileAdjust = getBusinessProfileAdjust(config.serverProfile);
-  return Object.fromEntries(componentServerDefinitions.map((definition) => {
+  const specs = Object.fromEntries(componentServerDefinitions.map((definition) => {
     const customEnabled = config.serverConfigMode === "customer" && $(componentInputId(definition.key, "Enabled")).checked;
     const recommendedMax = definition.key === "cn"
       ? Math.max(1, Math.floor(definition.maxInstances * profileAdjust.cn))
@@ -1112,6 +1149,24 @@ function getBusinessComponentSpecs(config) {
       osLabel: componentOsLabels[spec.os]
     }];
   }));
+  const source = $("businessHostModelSource").value;
+  if (source !== "component") {
+    if (!Object.hasOwn(specs, source)) throw new PlanningInputError("统一宿主机型选项无效");
+    const hardware = specs[source];
+    Object.keys(specs).forEach(key => {
+      const { key: componentKey, label, purpose, maxInstances } = specs[key];
+      specs[key] = { ...hardware, key: componentKey, label, purpose, maxInstances,
+        sourceLabel: `${hardware.sourceLabel} · 统一采用${componentServerDefinitions.find(d => d.key === source).label}机型` };
+    });
+  }
+  for (const key of ["cn", "dn"]) specs[key].maxInstances = getPocInstanceLimit("business", key, specs[key].maxInstances);
+  return specs;
+}
+
+function getPocInstanceLimit(prefix, key, fallback) {
+  if ($("environmentType").value !== "poc") return fallback;
+  if (!$(`${prefix}DensityEnabled`).checked) return planningLimits.instances;
+  return integerValue(`${prefix}Poc${key === "cn" ? "Cn" : "Dn"}Limit`, 0) || fallback;
 }
 
 const dnPrimaryLabels = { balanced: "生产中心均衡", centerA: "主分片集中中心 A", centerB: "主分片集中中心 B" };
@@ -1161,8 +1216,9 @@ function buildBusinessSiteDemands(config) {
     tenant.cnByAz.forEach((count, azIndex) => {
       const demand = sites[azIndex].cn;
       demand.instances += count;
-      demand.cpuCores += count * tenant.cnCores;
-      demand.memoryGb += count * tenant.cnMemoryGb;
+      const roles = tenant.cnRoleSpecs?.filter(r=>r.azIndex===azIndex);
+      demand.cpuCores += roles ? roles.reduce((n,r)=>n+r.cores,0) : count * tenant.cnCores;
+      demand.memoryGb += roles ? roles.reduce((n,r)=>n+r.memoryGb,0) : count * tenant.cnMemoryGb;
     });
     for (let group = 1; group <= tenant.shardCount; group += 1) {
       for (let replica = 1; replica <= tenant.replicasPerShard; replica += 1) {
@@ -1196,9 +1252,11 @@ function buildBusinessSiteDemands(config) {
       site.cn.isolationFloor = config.resourceReduction.cnTenantPlacement === "isolated"
         ? localCnByTenant.reduce((sum, count) => sum + count, 0)
         : Math.max(0, ...localCnByTenant);
-    } else if (config.resourceReduction.cnTenantPlacement === "isolated") {
-      site.cn.isolationFloor = localCnByTenant.reduce((sum, count) =>
-        sum + Math.ceil(count / Math.max(1, config.componentSpecs.cn.maxInstances)), 0);
+    } else {
+      const limit = Math.min(config.componentSpecs.cn.maxInstances, config.resourceReduction.maxTenantCnPerServer);
+      const floors = localCnByTenant.map(count => Math.ceil(count / Math.max(1, limit)));
+      site.cn.isolationFloor = config.resourceReduction.cnTenantPlacement === "isolated"
+        ? floors.reduce((sum, count) => sum + count, 0) : Math.max(0, ...floors);
     }
     const localDnByTenant = config.tenantPlans.map((tenant) => {
       let count = 0;
@@ -1451,6 +1509,7 @@ function buildBusinessServerSizing(config) {
     maxDnPerServer,
     maxCnPerServer,
     maxTenantDnPerServer: config.resourceReduction.maxTenantDnPerServer,
+    maxTenantCnPerServer: config.resourceReduction.maxTenantCnPerServer,
     reserveRatio: config.reserveRatio,
     allowShardColocation: config.resourceReduction.allowShardColocation,
     allowGtmGroupColocation: config.resourceReduction.allowGtmGroupColocation,
@@ -1852,6 +1911,7 @@ function buildBusinessPhysicalServerPlan(config) {
   placeDnRolesByPool(servers, config);
   placeGtmRolesByPool(servers, config);
   placeManagementRolesByPool(servers, config);
+  balanceDnPrimaryRoles(servers, config);
 
   return servers.map((server) => {
     const resourceAudit = getServerResourceAudit(server, config);
@@ -1943,7 +2003,10 @@ function getRoleResourceDemand(role, tenantPlans) {
   const dnRole = parseDnPlacementRole(role);
   const tenantName = cnTenant || dnRole?.tenant;
   const tenant = tenantPlans.find((item) => getTenantKey(item) === tenantName);
-  if (cnTenant && tenant) return { cpu: tenant.cnCores, memory: tenant.cnMemoryGb, disk: 0 };
+  if (cnTenant && tenant) {
+    const spec = tenant.cnRoleSpecs?.[Number(/-CN(\d+)$/.exec(role)[1])-1];
+    return { cpu: spec?.cores ?? tenant.cnCores, memory: spec?.memoryGb ?? tenant.cnMemoryGb, disk: 0 };
+  }
   if (dnRole && tenant) return {
     cpu: tenant.dnCores,
     memory: tenant.dnMemoryGb,
@@ -2008,7 +2071,9 @@ function placeTenantCnRolesByPool(servers, config) {
       };
       const roleName = `${getTenantKey(tenant)}-CN${roleIndex}`;
       const capacityCandidates = candidates
-        .filter((server) => server.cnCount < config.maxCnPerServer && canPlaceRoleWithinWatermark(server, roleName, config));
+        .filter((server) => server.cnCount < config.maxCnPerServer
+          && server.roles.filter(role => parseCnTenant(role) === getTenantKey(tenant)).length < (config.maxTenantCnPerServer || config.maxCnPerServer)
+          && canPlaceRoleWithinWatermark(server, roleName, config));
       const antiAffinityCandidates = capacityCandidates
         .filter((server) => config.environment !== "production"
           || !server.roles.some((role) => parseCnTenant(role) === getTenantKey(tenant)));
@@ -2016,11 +2081,7 @@ function placeTenantCnRolesByPool(servers, config) {
         .filter((server) => config.cnTenantPlacement === "shared"
           || getServerCnTenants(server).every((name) => name === getTenantKey(tenant)))
         .sort(comparePlacement);
-      const target = config.environment === "production"
-        ? policyCandidates[0]
-        : policyCandidates[0]
-          || capacityCandidates.sort(comparePlacement)[0]
-          || candidates.sort(comparePlacement)[0];
+      const target = policyCandidates[0];
       if (!target) continue;
       target.roles.push(roleName);
       target.cnCount += 1;
@@ -2095,6 +2156,9 @@ function placeDnRolesByPool(servers, config) {
           if (azDelta) return azDelta;
           const aTenantDn = countTenantDnRoles(a, getTenantKey(tenant));
           const bTenantDn = countTenantDnRoles(b, getTenantKey(tenant));
+          if (config.environment === "poc" && config.dnTenantPlacement === "shared") {
+            return aTenantDn - bTenantDn || a.dnCount - b.dnCount || a.roles.length - b.roles.length || a.id.localeCompare(b.id);
+          }
           if (config.dnTenantPlacement === "shared") {
             const aCrossTenant = getServerDnTenants(a).some((name) => name !== getTenantKey(tenant));
             const bCrossTenant = getServerDnTenants(b).some((name) => name !== getTenantKey(tenant));
@@ -2105,7 +2169,9 @@ function placeDnRolesByPool(servers, config) {
             // Reuse an isolated tenant's hosts before claiming empty shared-pool hosts.
             // Eligibility still enforces replica anti-affinity, density and watermarks.
             if (config.dnTenantPlacement === "isolated" && aTenantDn !== bTenantDn) {
-              return bTenantDn - aTenantDn;
+              return config.environment === "poc"
+                ? Number(aTenantDn === 0) - Number(bTenantDn === 0) || aTenantDn - bTenantDn
+                : bTenantDn - aTenantDn;
             }
             if (config.environment === "production" && aTenantDn !== bTenantDn) {
               return aTenantDn - bTenantDn;
@@ -2139,6 +2205,92 @@ function getDnTenantIsolationViolations(serverPlan, dnTenantPlacement) {
   return serverPlan
     .map((server) => ({ serverId: server.id, tenants: getServerDnTenants(server) }))
     .filter((item) => item.tenants.length > 1);
+}
+
+function balanceDnPrimaryRoles(servers, config) {
+  const countMasters = (server, key) => server.roles.filter(role => {
+    const parsed = parseDnPlacementRole(role);
+    return parsed?.role === "M" && (!key || parsed.tenant === key);
+  }).length;
+  const validHost = server => {
+    const dn = server.roles.map(parseDnPlacementRole).filter(Boolean);
+    const tenants = [...new Set(dn.map(role => role.tenant))];
+    return server.componentKeys.includes("dn")
+      && dn.length <= config.maxDnPerServer
+      && new Set(dn.map(role => `${role.tenant}:${role.group}`)).size === dn.length
+      && (config.dnTenantPlacement !== "isolated" || tenants.length <= 1)
+      && tenants.every(key => dn.filter(role => role.tenant === key).length <= config.maxTenantDnPerServer)
+      && getServerResourceAudit(server, config)?.withinWatermark === true;
+  };
+  const eligibleTenants = config.tenantPlans.filter(tenant => {
+    const key = getTenantKey(tenant);
+    return !getDnPlacementIssues({ ...config, reverse: true, serverPlan: servers, tenantPlans: [tenant] }).length
+      && servers.filter(server => countTenantDnRoles(server, key)).every(server =>
+        server.tenantPool === getTenantResourcePoolKey(tenant) && validHost(server));
+  });
+  // Each swap strictly reduces tenant M-count squared, or (on a tie) host M-count squared.
+  // A bounded local search is a planning heuristic, not a workload or global optimum proof.
+  let changed = true, swaps = 0;
+  while (changed && swaps < 2000) {
+    changed = false;
+    for (const tenant of eligibleTenants) {
+      const key = getTenantKey(tenant);
+      for (let azIndex = 0; azIndex < config.azCount; azIndex++) {
+        const hosts = servers.filter(server => server.azIndex === azIndex && countTenantDnRoles(server, key));
+        const targets = [...hosts].sort((a, b) => countMasters(a, key) - countMasters(b, key)
+          || countMasters(a) - countMasters(b) || a.id.localeCompare(b.id));
+        let exchanged = false;
+        for (const sameGroupOnly of [true, false]) {
+          for (const source of [...targets].reverse()) {
+            for (const target of targets) {
+              const delta = countMasters(source, key) - countMasters(target, key);
+              if (source === target || delta < 1 || (delta === 1 && countMasters(source) - countMasters(target) <= 1)) continue;
+              for (let i = 0; i < source.roles.length && !exchanged; i++) {
+                const master = parseDnPlacementRole(source.roles[i]);
+                if (master?.tenant !== key || master.role !== "M") continue;
+                const candidates = target.roles.map((role, index) => ({ role: parseDnPlacementRole(role), index }))
+                  .filter(item => item.role?.tenant === key && item.role.role !== "M"
+                    && (!sameGroupOnly || item.role.group === master.group));
+                for (const { index: j } of candidates) {
+                  [source.roles[i], target.roles[j]] = [target.roles[j], source.roles[i]];
+                  if (validHost(source) && validHost(target)) { exchanged = true; break; }
+                  [source.roles[i], target.roles[j]] = [target.roles[j], source.roles[i]];
+                }
+              }
+              if (exchanged) break;
+            }
+            if (exchanged) break;
+          }
+          if (exchanged) break;
+        }
+        if (exchanged) { changed = true; swaps++; }
+      }
+    }
+  }
+}
+
+function getDnPrimaryDistribution(data) {
+  const servers = getPlanServers(data);
+  return data.tenantPlans.flatMap(tenant => {
+    const key = getTenantKey(tenant);
+    const incomplete = getDnPlacementIssues({ ...data, tenantPlans: [tenant] }).length > 0;
+    return getAzNames(data.mode, data.azCount).flatMap((az, azIndex) => {
+      const hosts = servers.filter(server => server.azIndex === azIndex && countTenantDnRoles(server, key))
+        .map(server => {
+          const roles = server.roles.map(parseDnPlacementRole).filter(role => role?.tenant === key);
+          return { id: server.id, totalMasters: server.roles.filter(role => parseDnPlacementRole(role)?.role === "M").length,
+            masters: roles.filter(role => role.role === "M").length,
+            slaves: roles.filter(role => role.role !== "M").length };
+        });
+      if (!hosts.length) return [];
+      const spread = Math.max(...hosts.map(host => host.masters)) - Math.min(...hosts.map(host => host.masters));
+      const status = incomplete ? "未评估：副本落位不完整或目标中心不符"
+        : spread > 1 ? "主角色仍偏斜：当前约束下局部交换未达到均衡，需评审资源与副本布局"
+        : "已落位主机间 M 数差不超过 1（仅计数，不代表负载均衡）";
+      return [{ tenant: key, az, hosts, spread, incomplete, status,
+        text: `${displayTenantKey(key, data.tenantPlans)} / ${az}：${hosts.map(host => `${host.id} ${host.masters}M/${host.slaves}S（全租户合计 ${host.totalMasters}M）`).join("；")}。${status}` }];
+    });
+  });
 }
 
 function getControlPlanePlacementAudit(serverPlan, managementNodes, gtmNodes) {
@@ -2266,7 +2418,7 @@ function placeGtmRolesByPool(servers, config) {
       countMatchingRole(server, isGtmRole) < maxPerServer &&
       canPlaceRoleWithinWatermark(server, placement.label, config)
     )
-      || policyCandidates.find((server) => countMatchingRole(server, isGtmRole) < maxPerServer);
+      || (config.environment !== "poc" && policyCandidates.find((server) => countMatchingRole(server, isGtmRole) < maxPerServer));
     if (target) target.roles.push(placement.label);
   });
 }
@@ -2337,7 +2489,7 @@ function placeManagementRolesByPool(servers, config) {
         return Number(bMixedWithGtm) - Number(aMixedWithGtm) || a.roles.length - b.roles.length || a.id.localeCompare(b.id);
       });
     const target = candidates.find((server) => countRole(server, "管理节点") < 1 && canPlaceRoleWithinWatermark(server, "管理节点", config))
-      || candidates.find((server) => countRole(server, "管理节点") < 1);
+      || (config.environment !== "poc" && candidates.find((server) => countRole(server, "管理节点") < 1));
     if (target) target.roles.push("管理节点");
   }
 }
@@ -2372,6 +2524,7 @@ function buildServerPlan(config) {
   placeDnRolesByPool(servers, config);
   placeGtmRolesByPool(servers, config);
   placeManagementRolesByPool(servers, config);
+  balanceDnPrimaryRoles(servers, config);
 
   return servers.map((server) => {
     const resourceAudit = getServerResourceAudit(server, config);
@@ -2385,6 +2538,26 @@ function buildServerPlan(config) {
 }
 
 function assignReverseHostGroups(servers, layout, sizing, mode, azCount) {
+  if (sizing.poolSizings?.every(pool => pool.siteSizing)) {
+    for (let azIndex = 0; azIndex < azCount; azIndex++) {
+      const groups = sizing.poolSizings.flatMap(pool => getBusinessHostGroups(layout, pool.siteSizing[azIndex])
+        .filter(group => group.count > 0)
+        .map(group => ({ ...group, tenantPool: pool.key, tenantPoolLabel: pool.label })));
+      const local = servers.filter(server => server.azIndex === azIndex && !server.componentKeys.length);
+      const counts = allocateReverseHostGroupCounts(groups, local.length);
+      let cursor = 0;
+      groups.forEach((group, groupIndex) => {
+        for (let index = 0; index < counts[groupIndex]; index++) {
+          const server = local[cursor++];
+          server.hostGroup = group.label;
+          server.componentKeys = [...group.componentKeys];
+          server.tenantPool = group.tenantPool;
+          server.tenantPoolLabel = group.tenantPoolLabel;
+        }
+      });
+    }
+    return;
+  }
   const groups = sizing.poolSizings
     ? sizing.poolSizings.flatMap((pool) => getBusinessHostGroups(layout, pool.sizing)
       .filter((group) => group.count > 0)
@@ -2700,7 +2873,7 @@ function buildBusinessTenantPlans(data) {
       referenceTps: data.dnReferenceTps
     });
 
-    return {
+    const plan = {
       tenantNo,
       tenantId: spec.tenantId,
       name: normalizeTenantName(spec.name, tenantNo),
@@ -2756,6 +2929,7 @@ function buildBusinessTenantPlans(data) {
       gtmLabel: "待绑定",
       gtmGroupText: "待绑定"
     };
+    return hasWorkloadSettings(spec) ? applyWorkloadSettings(plan, spec, data) : plan;
   });
   assertPlanningScale(plans.reduce((sum, tenant) => sum + tenant.totalCn + tenant.dnInstances, 0), "instances");
   return plans;
@@ -2822,6 +2996,100 @@ function getCnFittingCores(spec, reserveRatio, requestedCores) {
   const limit = Math.floor(Math.min(requestedCores, spec.cores * (1 - reserveRatio), spec.memoryGb * (1 - reserveRatio) / 2));
   if (limit < 1) throw new PlanningInputError("CN 服务器扣除预留后不足 1 物理核或 2GB 内存，无法放入 CN 实例；请调整机型或预留。");
   return [64, 32, 16, 8].find((cores) => cores <= limit) || limit;
+}
+
+function hasWorkloadSettings(spec) {
+  return spec.workloadMode === "split" || spec.cnSizingMode === "manual" || spec.dnSizingMode === "manual";
+}
+
+function workloadNumber(value, label, min = 0, integer = false, max = Number.MAX_SAFE_INTEGER) {
+  const error = numericInputError(value, label, { min, max, integer });
+  if (error) throw new PlanningInputError(error);
+  return Number(value);
+}
+
+function applyWorkloadSettings(plan, spec, data) {
+  const split = spec.workloadMode === "split";
+  const issues = [];
+  const makeCn = (key, target, unit, k, water, growth, manual, cores, memory, count) => {
+    const label = key === "batch" ? "跑批" : split ? "在线" : "业务";
+    k = workloadNumber(k, `${label}单核吞吐标定`, Number.MIN_VALUE);
+    water = workloadNumber(water, `${label}CPU水位`, 0.01, false, 1);
+    target *= growth;
+    const planningCores = manual ? workloadNumber(cores, `${label}CN物理核`, 1, true, 2000) : data.cpuCores;
+    const recommended = maybeEven(Math.max(2, Math.ceil(target / (k * water * planningCores))), data.forceEven);
+    const n = count || recommended;
+    assertPlanningScale(n, "instances");
+    const auto = recommendCnNodeSpec({tenantTxnTps: target, cnPerAz: n, singleCoreTps: k, cpuLimit: water, maxCores: planningCores});
+    const c = manual ? planningCores : auto.cores;
+    const m = manual ? workloadNumber(memory, `${label}CN内存`, 1) : auto.memoryGb;
+    const capacity = c * k * water * n;
+    if (capacity < target || n < 2) issues.push(`${label} CN ${n} 个/生产AZ，安全初算 ${round(capacity)}/${round(target)} ${unit}；性能或至少两实例规则不满足。`);
+    return {key, label, unit, target, k, water, cores:c, memoryGb:m, count:n, recommended, capacity,
+      cnByAz:data.siteCapacityFactors.map(f=>Math.max(1,Math.ceil(n*f))),
+      reason:`${label}：目标 ${round(target)} ${unit}，单核标定 ${k} × 水位 ${water}；每生产AZ ${n} × ${c}物理核/${m}GB，安全初算 ${round(capacity)} ${unit}。${manual ? "手动规格不自动抬高。" : "内存按现有2GB/核初算，需压测。"}`};
+  };
+  const onlineT = split ? workloadNumber(spec.onlineSqlPerTxn, "在线每事务SQL数", 1) : data.sqlPerTxn;
+  const onlineGrowth = split ? Math.pow(workloadNumber(spec.onlineGrowth, "在线增长系数", 1), numberValue("years")) : data.transactionGrowthPower;
+  const online = makeCn("online", spec.qps / onlineT, "TPS",
+    split ? spec.onlineCoreTps : data.singleCoreTps, split ? spec.onlineCpuLimit : data.cpuLimit,
+    onlineGrowth, spec.cnSizingMode === "manual", spec.cnCores, spec.cnMemoryGb,
+    split ? workloadNumber(spec.onlineCount, "在线CN数量", 0, true, 2000) : spec.cnPerAzManual ? Number(spec.cnPerAz) : 0);
+  const workloads = [online];
+  if (split) {
+    const mode = spec.batchRateMode || "qps";
+    if (!["qps", "tps", "work"].includes(mode)) throw new PlanningInputError("跑批性能单位无效");
+    let target;
+    if (mode === "work") target = workloadNumber(spec.batchAmount, "跑批处理量", 1) / (workloadNumber(spec.batchWindow, "有效跑批窗口小时", Number.MIN_VALUE) * 3600);
+    else target = workloadNumber(spec.batchRate, "跑批吞吐目标", Number.MIN_VALUE) / (mode === "qps" ? workloadNumber(spec.batchSqlPerTxn, "跑批每事务SQL数", 1) : 1);
+    const batch = makeCn("batch", target, mode === "work" ? "业务单位/秒" : "TPS", spec.batchCoreTps, spec.batchCpuLimit,
+      Math.pow(workloadNumber(spec.batchGrowth, "跑批增长系数", 1), numberValue("years")),
+      spec.batchSizingMode === "manual", spec.batchCores, spec.batchMemoryGb,
+      workloadNumber(spec.batchCount, "跑批CN数量", 0, true, 2000));
+    workloads.push(batch);
+    issues.push("在线/跑批 CN 为独立计算组但共享 DN/GTM：线性吞吐尚需同SQL、同并发、多CN压测及故障重试窗口验证，不能据此承诺跑批完成时限。");
+  }
+  const joint = split ? workloadNumber(spec.jointDnTps, "共享DN混合负载等效规划TPS", 0) : 0;
+  const dnTarget = Math.max(joint, online.target);
+  if (split && joint > 0 && joint < online.target) issues.push("共享 DN 等效规划TPS低于在线需求；暂按在线需求兜底，混合负载性能仍需重新评估。");
+  if (split && !joint) issues.push("共享 DN/GTM 混合性能未评估：请提供混合负载等效规划TPS及匹配标定；当前DN只按在线负载和数据量初算，不代表可承载跑批。");
+  const manualDn = spec.dnSizingMode === "manual";
+  const dnCores = manualDn ? workloadNumber(spec.dnCores, "DN物理核", 1, true, 2000) : data.dnReferenceCores;
+  const dnMemory = manualDn ? workloadNumber(spec.dnMemoryGb, "DN内存", 1) : data.dnReferenceMemoryGb;
+  const dnLimit = data.safeShardTps * Math.min(1, dnCores / data.dnReferenceCores);
+  const byCapacity = Math.ceil(plan.futureDataTb / data.maxShardTb);
+  const byTps = Math.ceil(dnTarget / dnLimit);
+  const recommendedShards = plan.isDistributed ? maybeEven(Math.max(1, byCapacity, byTps), data.forceEven) : 1;
+  const groups = plan.isDistributed && spec.minShardsManual ? Number(spec.minShards) : recommendedShards;
+  const dn = recommendDnNodeSpec({tenantTxnTps:dnTarget, futureDataTb:plan.futureDataTb, shardCount:groups,
+    safeShardTps:dnLimit, maxShardTb:data.maxShardTb, referenceCores:data.dnReferenceCores,
+    referenceMemoryGb:data.dnReferenceMemoryGb, referenceTps:data.dnReferenceTps});
+  if (manualDn && (dnCores > data.dnReferenceCores || dnMemory < data.dnReferenceMemoryGb * Math.min(1,dnCores/data.dnReferenceCores))) {
+    issues.push("手动 DN 规格超出标定核数范围或低于标定内存比例：性能未验证，不能按比例保证吞吐。");
+  }
+  if (dnTarget / groups > dnLimit || plan.futureDataTb / groups > data.maxShardTb) issues.push("DN 单分片性能或容量超过规划水位，请增加 Group 或复核规格与标定。");
+  const cnByAz = data.siteCapacityFactors.map((_,az)=>workloads.reduce((n,w)=>n+w.cnByAz[az],0));
+  const cnRoleSpecs = [];
+  assertPlanningScale(cnByAz.reduce((a,b)=>a+b,0), "instances");
+  cnByAz.forEach((_,azIndex)=>workloads.forEach(w=>{
+    for(let i=0;i<w.cnByAz[azIndex];i++) cnRoleSpecs.push({azIndex,key:w.key,label:w.label,cores:w.cores,memoryGb:w.memoryGb});
+  }));
+  const c = manualDn ? dnCores : dn.cores, m = manualDn ? dnMemory : dn.memoryGb;
+  return {...plan, cnWorkloads:workloads, cnRoleSpecs, workloadIssues:issues, workloadMode:split?"split":"single",
+    cnPerAz:workloads.reduce((n,w)=>n+w.count,0), recommendedCnPerAz:workloads.reduce((n,w)=>n+w.recommended,0),
+    cnByAz,totalCn:cnRoleSpecs.length,cnCores:online.cores,cnMemoryGb:online.memoryGb,
+    cnCpuDemand:cnRoleSpecs.reduce((n,r)=>n+r.cores,0),cnMemoryDemand:cnRoleSpecs.reduce((n,r)=>n+r.memoryGb,0),
+    cnSpecLabel:workloads.map(w=>`${w.label} ${w.cores}C/${w.memoryGb}GB`).join("；"),cnSpecReason:workloads.map(w=>w.reason).join("；"),
+    cnBelowMinimum:workloads.some(w=>w.capacity<w.target||w.count<2),cnTargetTps:online.target,cnSafeTpsPerAz:online.capacity,
+    cnSafeTpsPerNode:online.capacity/online.count,businessTxnTps:Number(spec.qps)/onlineT,
+    plannedTxnTps:dnTarget,shardByCapacity:byCapacity,shardByTps:byTps,recommendedShardCount:recommendedShards,
+    minShards:recommendedShards,shardCount:groups,dnInstances:groups*plan.replicasPerShard,
+    masterCount:groups,slaveCount:groups*(plan.replicasPerShard-1),
+    shardBelowMinimum:groups<recommendedShards||dnTarget/groups>dnLimit||plan.futureDataTb/groups>data.maxShardTb,
+    dnCores:c,dnMemoryGb:m,dnCpuDemand:groups*plan.replicasPerShard*c,dnMemoryDemand:groups*plan.replicasPerShard*m,
+    dnSpecLabel:`${c}C/${m}GB`,dnPerShardTps:dnTarget/groups,dnPerShardTb:plan.futureDataTb/groups,
+    dnSpecFormula:`${manualDn?"手动":"自动"} ${c}物理核/${m}GB；每Group目标 ${round(dnTarget/groups)} TPS，规划性能上限 ${round(dnLimit)} TPS；数据 ${round(plan.futureDataTb/groups)}TB。`,
+    dnSpecReason:manualDn?"手动规格保留；CPU缩小时按标定比例初算，超标定范围不外推性能。":dn.reason};
 }
 
 function recommendCnNodeSpec(data) {
@@ -2941,7 +3209,10 @@ function render(options = {}) {
   const shouldRenderTenantEditors = options.tenantEditors !== false;
   syncParameterPanels();
   const issues = getPlanningInputIssues();
-  if (!issues.length && $("designModule").value === "business") syncBusinessTenantAutoValues();
+  if (!issues.length && $("designModule").value === "business") {
+    try { syncBusinessTenantAutoValues(); }
+    catch(error) { if (!(error instanceof PlanningInputError)) throw error; issues.push(error.message); }
+  }
   if (shouldRenderTenantEditors) {
     renderTenantEditors();
   }
@@ -2979,6 +3250,7 @@ function render(options = {}) {
     $("businessServerBlock").classList.remove("hidden");
   }
   renderTopology(data);
+  $("placementDetails").innerHTML = renderCnPlacementSummary(data);
   renderExcelExportSummary(data);
   renderRelationGraph(data);
 }
@@ -3085,6 +3357,7 @@ function renderBusinessTenantEditor() {
         <small>独立模式使用专属物理服务器资源池；共享模式仍受水位、反亲和和组件混部规则约束。</small>
       </label>
       ${renderPrimarySelector(tenant, index, "business")}
+      ${renderWorkloadEditor(tenant, index)}
       <div class="grid-two">
         <label class="field compact-field">
           <span>租户形态</span>
@@ -3094,14 +3367,14 @@ function renderBusinessTenantEditor() {
           </select>
         </label>
         <label class="field compact-field">
-          <span>租户 SQL QPS</span>
+          <span>${tenant.workloadMode === "split" ? "在线 SQL QPS（非在线+跑批总和）" : "租户 SQL QPS"}</span>
           <input class="tenant-input" data-mode="business" data-index="${index}" data-key="qps" type="number" min="1" value="${tenant.qps}">
         </label>
         <label class="field compact-field">
           <span>数据量 TB（业务预计体量）</span>
           <input class="tenant-input" data-mode="business" data-index="${index}" data-key="dataTb" type="number" min="0.1" step="0.1" value="${tenant.dataTb}">
         </label>
-        <label class="field compact-field tenant-node-field">
+        <label class="field compact-field tenant-node-field ${tenant.workloadMode === "split" ? "hidden" : ""}">
           <span>CN 节点/单生产 AZ（${tenant.cnPerAzManual ? "手工" : "自动"}）</span>
           <div class="tenant-stepper">
             <button type="button" aria-label="减少 CN" data-action="adjust-business-cn" data-index="${index}" data-delta="-1">−</button>
@@ -3129,6 +3402,37 @@ function renderBusinessTenantEditor() {
     </article>
     `;
   }).join("");
+}
+
+function renderWorkloadEditor(t, index) {
+  const defaults = {workloadMode:"single",cnSizingMode:"auto",dnSizingMode:"auto",onlineSqlPerTxn:Number($("sqlPerTxn").value)||20,
+    onlineCoreTps:Number($("singleCoreTps").value)||50,onlineCpuLimit:Number($("cpuLimit").value)||0.7,onlineGrowth:Number($("transactionGrowthFactor").value)||1,onlineCount:0,
+    batchRateMode:"qps",batchRate:"",batchSqlPerTxn:20,batchCoreTps:"",batchCpuLimit:0.7,batchGrowth:1,batchCount:0,
+    batchSizingMode:"auto",batchCores:16,batchMemoryGb:64,batchAmount:"",batchWindow:"",jointDnTps:0};
+  Object.entries(defaults).forEach(([k,v])=>{if(t[k]===undefined)t[k]=v;});
+  const input=(key,label,min=1,step="any")=>`<label class="field"><span>${label}</span><input class="tenant-input" data-mode="business" data-index="${index}" data-key="${key}" type="number" min="${min}" step="${step}" value="${escapeAttr(t[key]??"")}"></label>`;
+  const select=(key,label,options)=>`<label class="field"><span>${label}</span><select class="tenant-input" data-mode="business" data-index="${index}" data-key="${key}">${options.map(([v,l])=>`<option value="${v}" ${t[key]===v?"selected":""}>${l}</option>`).join("")}</select></label>`;
+  const modeOptions=[["auto","自动推荐"],["manual","手动指定"]];
+  return `<div class="workload-settings">
+    ${select("workloadMode","CN 业务场景",[["single","单场景（兼容原方案）"],["split","在线 + 跑批（同租户独立CN）"]])}
+    <div class="grid-two">${select("cnSizingMode",t.workloadMode==="split"?"在线单CN规格":"单CN规格",modeOptions)}
+      ${select("dnSizingMode","单DN实例规格（非整机）",modeOptions)}
+      ${t.cnSizingMode==="manual"?input("cnCores","单CN物理核",1,"1")+input("cnMemoryGb","单CN内存GB"):""}
+      ${t.dnSizingMode==="manual"?input("dnCores","单DN物理核",1,"1")+input("dnMemoryGb","单DN内存GB"):""}</div>
+    ${t.workloadMode==="split"?`<h4>在线 CN</h4><div class="grid-two">
+      ${input("onlineSqlPerTxn","在线每事务SQL数")}${input("onlineCoreTps","在线单核TPS标定")}
+      ${input("onlineCpuLimit","在线CPU水位",0.01)}${input("onlineGrowth","在线年增长系数")}
+      ${input("onlineCount","在线CN/生产AZ（0自动）",0,"1")}</div>
+      <h4>跑批 CN</h4><div class="grid-two">
+      ${select("batchRateMode","跑批性能输入口径",[["qps","SQL QPS"],["tps","数据库事务TPS"],["work","业务处理量 / 有效时间"]])}
+      ${t.batchRateMode==="work"?input("batchAmount","业务处理总量")+input("batchWindow","有效并行窗口（小时）",0.001):input("batchRate","跑批目标 "+(t.batchRateMode==="qps"?"SQL QPS":"TPS"))}
+      ${t.batchRateMode==="qps"?input("batchSqlPerTxn","跑批每事务SQL数（匹配实际模型）"):""}
+      ${input("batchCoreTps",t.batchRateMode==="work"?"跑批单核业务单位/秒（需标定）":"跑批单核TPS（需独立标定）")}
+      ${input("batchCpuLimit","跑批CPU水位",0.01)}${input("batchGrowth","跑批年增长系数")}
+      ${input("batchCount","跑批CN/生产AZ（0自动）",0,"1")}${select("batchSizingMode","跑批单CN规格",modeOptions)}
+      ${t.batchSizingMode==="manual"?input("batchCores","跑批单CN物理核",1,"1")+input("batchMemoryGb","跑批单CN内存GB"):""}
+      ${input("jointDnTps","共享DN等效规划TPS（0未评估）",0)}</div>`:""}
+    </div>`;
 }
 
 function renderReverseTenantEditor() {
@@ -3204,17 +3508,32 @@ function syncParameterPanels() {
 
 function syncResourceReductionControls() {
   ["business", "reverse"].forEach((prefix) => {
+    const poc = $("environmentType").value === "poc";
+    const densityEnabled = !poc || $(`${prefix}DensityEnabled`).checked;
+    $(`${prefix}PocDensitySettings`).classList.toggle("hidden", !poc);
+    $(`${prefix}DensityEnabled`).disabled = !poc;
+    for (const suffix of ["PocCnLimit", "PocDnLimit", "PocTenantCnLimit"]) {
+      $(`${prefix}${suffix}`).disabled = !poc || !densityEnabled;
+    }
     const tenantLimitInput = $(`${prefix}MaxTenantDnPerServer`);
-    tenantLimitInput.disabled = !$(`${prefix}AllowShardColocation`).checked;
-    const machineLimit = prefix === "business"
+    tenantLimitInput.disabled = !$(`${prefix}AllowShardColocation`).checked || !densityEnabled;
+    const defaultLimit = prefix === "business"
       ? ($("businessServerConfigMode").value === "customer" && $(componentInputId("dn", "Enabled")).checked
         ? Number($(componentInputId("dn", "MaxInstances")).value)
         : componentServerDefinitions.find((item) => item.key === "dn").maxInstances)
       : Number($("reverseMaxDnPerServer").value);
+    const machineLimit = poc ? (densityEnabled ? (Number($(`${prefix}PocDnLimit`).value) || defaultLimit) : planningLimits.instances) : defaultLimit;
     tenantLimitInput.max = String(machineLimit);
     const configured = Number(tenantLimitInput.value);
     const status = $(`${prefix}DnDensityStatus`);
     if (!status) return;
+    if (!densityEnabled || !$(`${prefix}AllowShardColocation`).checked) {
+      status.className = "density-status valid";
+      status.textContent = !densityEnabled
+        ? "POC 实例数量限制已关闭；资源水位、租户隔离、同 Group 副本跨机及浏览器规模保护仍生效。"
+        : "同租户 DN 共宿已关闭：每台最多 1 个该租户 DN，仍校验资源与副本隔离。";
+      return;
+    }
     const valid = Number.isSafeInteger(configured) && configured >= 1 && Number.isSafeInteger(machineLimit) && machineLimit >= 1 && configured <= machineLimit;
     status.className = `density-status ${valid ? "valid" : "invalid"}`;
     status.textContent = valid
@@ -3339,6 +3658,11 @@ function getDisasterText(mode) {
 
 function renderRisks(data) {
   const risks = getDnPlacementIssues(data).map(issue => ["risk-high", issue]);
+  (data.centerQuotaAudit || []).filter(site => site.missing).forEach(site => risks.push([
+    "risk-high", `${site.az} 主机配额不足：需要 ${site.required} 台，当前 ${site.available} 台，已分配 ${site.assigned} 台；不能借用其他中心主机抵消缺口。`
+  ]));
+  getDnPrimaryDistribution(data).filter(item => item.incomplete || item.spread > 1)
+    .forEach(item => risks.push(["risk-mid", item.text]));
   if (data.reverse) {
     if (data.mode === "local1az" && data.environment === "production") {
       risks.push(["risk-high", "生产环境选择了本地单机房模式，无法覆盖机房级故障，核心业务不建议采用。"]);
@@ -3378,7 +3702,7 @@ function renderRisks(data) {
     } else if (data.environment === "production") {
       risks.push(["risk-ok", "已校验当前已落位的生产 CN：同一租户按一机一实例分散部署。"]);
     }
-    if (data.environment === "production" && !data.cnPlacementAudit.complete) {
+    if (!data.cnPlacementAudit.complete) {
       risks.push(["risk-high", `CN 实际落位 ${data.cnPlacementAudit.actual}/${data.cnPlacementAudit.requested}，服务器不足时未突破同租户 CN 反亲和；请增加 CN 主机。`]);
     }
     if (data.dnTenantIsolationViolations.length) {
@@ -3490,7 +3814,7 @@ function renderRisks(data) {
   } else if (data.environment === "production") {
     risks.push(["risk-ok", "已校验当前已落位的生产 CN：同一租户按一机一实例分散部署。"]);
   }
-  if (data.environment === "production" && !data.serverSizing.cnPlacementAudit.complete) {
+  if (!data.serverSizing.cnPlacementAudit.complete) {
     risks.push(["risk-high", `CN 实际落位 ${data.serverSizing.cnPlacementAudit.actual}/${data.serverSizing.cnPlacementAudit.requested}，服务器不足时未突破同租户 CN 反亲和；请增加 CN 主机。`]);
   }
   if (data.serverSizing.dnTenantIsolationViolations.length) {
@@ -3540,6 +3864,7 @@ function renderRisks(data) {
   risks.push(["risk-ok", "浙江移动公开案例可作为参考：每侧 20 CN、20 分片、核心库 1 主 3 备。"]);
   risks.push(["risk-ok", "Team/Group、高低水位属于版本相关配置，生产实施需回查 GoldenDB 版本手册。"]);
 
+  data.tenantPlans.forEach(t=>(t.workloadIssues||[]).forEach(issue=>risks.push(["risk-high",`${displayTenantKey(getTenantKey(t),data.tenantPlans)}：${issue}`])));
   $("riskList").innerHTML = risks
     .map(([cls, text]) => `<li class="${escapeAttr(cls)}">${escapeAttr(text)}</li>`)
     .join("");
@@ -3595,6 +3920,21 @@ function getLowWater(data, teamCount) {
 }
 
 function renderFormula(data) {
+  if (data.tenantPlans.some(t=>t.cnWorkloads)) {
+    $("formulaOutput").textContent = [
+      "逐租户、逐场景 CN 规划（线性工程估算，非厂商性能保证）：",
+      ...data.tenantPlans.flatMap(t=>[
+        `${displayTenantKey(getTenantKey(t),data.tenantPlans)}：${t.cnSpecReason}`,
+        `各中心 CN：${t.cnByAz.join(" / ")}；总实例 ${t.totalCn}，CPU合计 ${t.cnCpuDemand} 核、内存合计 ${t.cnMemoryDemand}GB。`,
+        `DN：容量维度 ${t.shardByCapacity} / 性能维度 ${t.shardByTps} Group，当前 ${t.shardCount} × ${t.replicasPerShard} 副本 = ${t.dnInstances} 实例。${t.dnSpecFormula}`,
+        ...(t.workloadIssues||[])
+      ]),
+      `租户 ${data.businessTenants}，GTM ${data.gtmNodes} 实例（${data.gtmBinding.groupCount} Group），管理节点 ${data.managementNodes}；未因场景拆分增加租户或复制DN数据。`,
+      `实际物理服务器 ${getPlanServers(data).length} 台；同租户生产 CN 仍跨物理机；每实例规格参与 CPU/内存/磁盘水位校验。`,
+      "共享DN负载采用等效规划TPS时必须匹配混合SQL标定，0表示未评估；当前不以错峰或异地缩减替代接管能力验证。"
+    ].join("\n");
+    return;
+  }
   const evenNote = data.forceEven ? "，取偶数" : "";
   const text = [
     "CN 计算节点公式：",
@@ -3661,6 +4001,8 @@ function renderReverseFormula(data) {
     `控制面实际落位 = 管理 ${data.controlPlaneAudit.actualManagementNodes}/${data.controlPlaneAudit.requestedManagementNodes}，GTM ${data.controlPlaneAudit.actualGtmNodes}/${data.controlPlaneAudit.requestedGtmNodes}`,
     `CN+DN混部判定：${data.componentSizing.mixedAnalyses.cnDn.detail}`,
     `当前组件组合 = ${data.componentLayoutLabel}，最少服务器 = ${data.requiredServerCount}`,
+    ...(data.centerQuotaAudit || []).map(site => `${site.az} 配额：需求 ${site.required} / 现有 ${site.available} / 已分配 ${site.assigned} / 缺口 ${site.missing} 台`),
+    `当前按服务器序号轮转到各中心；满足上述中心配额需要总数至少 ${data.requiredServerCount} 台，未自动增加客户输入机器。`,
     `资源状态 = ${data.resourceState}`,
     "",
     "评分：",
@@ -3778,6 +4120,10 @@ function getSelectedReductionMeasures(reduction) {
 
 function getResourceReductionRedlines(data) {
   const redlines = getDnPlacementIssues(data);
+  data.tenantPlans.forEach(t=>(t.workloadIssues||[]).forEach(issue=>redlines.push(`${displayTenantKey(getTenantKey(t),data.tenantPlans)}：${issue}`)));
+  (data.centerQuotaAudit || []).filter(site => site.missing).forEach(site => redlines.push(
+    `${site.az} 主机配额不足：需求 ${site.required} 台，现有 ${site.available} 台，缺口 ${site.missing} 台；请补足目标中心资源。`
+  ));
   const sizing = data.reverse ? data : data.serverSizing;
   const dnViolations = data.reverse ? data.dnReplicaHostViolations : data.serverSizing.dnReplicaHostViolations;
   const gtmViolations = data.reverse ? data.gtmReplicaHostViolations : data.serverSizing.gtmReplicaHostViolations;
@@ -3803,7 +4149,7 @@ function getResourceReductionRedlines(data) {
   if (data.environment === "production" && cnSameTenantHostViolations.length) {
     redlines.push(`生产 CN 同租户同机：${cnSameTenantHostViolations.map((item) => `${item.serverId}[${displayTenantKey(item.tenant, data.tenantPlans)}×${item.count}]`).join("、")}；同一租户每台物理服务器最多部署 1 个 CN。`);
   }
-  if (data.environment === "production" && !cnPlacementAudit.complete) {
+  if (!cnPlacementAudit.complete) {
     redlines.push(`CN 落位不完整：实际 ${cnPlacementAudit.actual}/${cnPlacementAudit.requested}；${cnPlacementAudit.tenants.filter((tenant) => !tenant.complete).map((tenant) => `${displayTenantKey(tenant.tenant, data.tenantPlans)} ${tenant.actual}/${tenant.requested}`).join("、")}。请增加 CN 可用服务器，不能以同租户 CN 同机规避资源不足。`);
   }
   if (dnTenantIsolationViolations.length) {
@@ -4087,7 +4433,7 @@ function renderTenantDnPlacement(placements) {
     <div class="ppt-dn-placement ${uniqueGroups.length > 1 ? "is-colocated" : ""}">
       ${uniqueGroups.length > 1 ? `<span class="group-colocation-badge">同租户多 Group 共宿 · ${uniqueGroups.map((group) => `G${group}`).join(" + ")}</span>` : ""}
       <div class="ppt-dn-group-list">
-        ${placements.map((item) => `<span class="ppt-dn-group-token">${escapeAttr(displayTenantKey(item.tenant))}-DN-G${item.group}-${escapeAttr(item.role)}</span>`).join("")}
+        ${placements.map((item) => `<span class="ppt-dn-group-token">${escapeAttr(displayTenantKey(item.tenant))}-DN-G${item.group}-${escapeAttr(item.role)}<small class="role-spec">${escapeAttr(getRoleSpecLabel(`${item.tenant}-DN-G${item.group}-Master`))}</small></span>`).join("")}
       </div>
     </div>
   `;
@@ -4122,7 +4468,6 @@ function renderPptNetworkPlan(data) {
 
   return `
     <div class="cn-plan-overview">${renderTopologyOverview(data)}</div>
-    ${renderCnPlacementSummary(data)}
     <div class="ppt-network-board" style="--site-count:${data.azCount}">
       <div class="ppt-workload-row">
         <strong>业务系统</strong>
@@ -4175,14 +4520,20 @@ function renderPptRolePill(role) {
   const label = displayRole(role)
     .replace(/-Master$/, "-M")
     .replace(/-Slave(\d*)$/, (_, no) => `-S${no || "1"}`);
-  return `<span class="ppt-role-pill ${type}" title="${escapeAttr(displayRole(role))}">${escapeAttr(label)}</span>`;
+  const detail = getRoleSpecLabel(role);
+  return `<span class="ppt-role-pill ${type}" title="${escapeAttr(displayRole(role))}">${escapeAttr(label)}${detail?`<small class="role-spec">${escapeAttr(detail)}</small>`:""}</span>`;
+}
+
+function getRoleSpecLabel(role, data = latestDesignData) {
+  if (!data || (!isCnRole(role) && !isDnRole(role))) return "";
+  const d = getRoleResourceDemand(role, data.tenantPlans);
+  return `${d.cpu}物理核 / ${d.memory}GB${isDnRole(role) ? ` / 数据${round(d.disk)}TB` : ""}`;
 }
 
 function renderPptServerTopology(data) {
   const servers = getPlanServers(data);
   const azNames = getAzNames(data.mode, data.azCount);
   return `
-    ${renderCnPlacementSummary(data)}
     <div class="physical-topology-board" style="--site-count:${data.azCount}">
       <div class="physical-site-grid">
         ${azNames.map((az, azIndex) => {
@@ -4224,6 +4575,7 @@ function renderPhysicalServer(server, data) {
         ${renderServerCnTenantMap(server.roles)}
         ${renderServerDnGroupMap(server.roles)}
         ${renderServerGtmGroupMap(server.roles)}
+        <div class="physical-instance-specs">${server.roles.filter(role=>getRoleSpecLabel(role,data)).map(role=>`<small>${escapeAttr(displayRole(role,data.tenantPlans))}：${escapeAttr(getRoleSpecLabel(role,data))}</small>`).join("")}</div>
         <small>${cnUnplaced ? "请检查机型、水位与隔离约束；不可作为接管能力" : escapeAttr(renderServerRoleDetail(server.roles))}</small>
         <em>${escapeAttr(specText)}</em>
       </div>
@@ -4643,7 +4995,7 @@ function renderServerRoleDetail(roles) {
 
 function renderCnPlacementSummary(data) {
   const servers = getPlanServers(data);
-  return `<div class="cn-placement-summary">${getAzNames(data.mode, data.azCount).map((az, index) => {
+  return `<div class="cn-placement-summary">${getDnPrimaryDistribution(data).map(item => `<div class="dn-primary-distribution">${escapeAttr(item.text)}</div>`).join("")}${getAzNames(data.mode, data.azCount).map((az, index) => {
     const hosts = servers.filter((server) => server.az === az && server.roles.some(isCnRole));
     const actual = hosts.reduce((sum, server) => sum + server.roles.filter(isCnRole).length, 0);
     const expected = data.tenantPlans.reduce((sum, tenant) => sum + (tenant.cnByAz?.[index] ?? tenant.cnPerAz), 0);
@@ -4943,7 +5295,7 @@ function copySummary() {
     `说明：该结果为预评估建议，生产需结合版本手册、厂商评审和 POC 压测。`
   ].join("\n");
 
-  navigator.clipboard?.writeText(summary).then(() => {
+  navigator.clipboard?.writeText(`${summary}\n${getDnPrimaryDistribution(data).map(item => item.text).join("\n")}`).then(() => {
     $("copyBtn").textContent = "已复制";
     setTimeout(() => {
       $("copyBtn").textContent = "复制摘要";
@@ -5216,6 +5568,19 @@ function buildExcelSheets(data) {
     ["资源预留比例", `${round((data.reverse ? data.reserveRatio : data.serverSizing.reserveRatio) * 100)}%`, "CPU、内存、磁盘均参与安全水位检查"],
     ["红线结论", redlines.length ? `未通过（${redlines.length} 项）` : "通过", redlines.length ? redlines[0] : "当前落位未触发硬红线"]
   ];
+  if (data.environment === "poc") {
+    summaryRows.push(["POC 实例密度", data.resourceReduction.densityEnabled ? "启用" : "关闭",
+      data.resourceReduction.densityEnabled
+        ? `单机 CN 总上限 ${sizing.maxCnPerServer}，同租户 CN 有效上限 ${Math.min(sizing.maxCnPerServer, data.resourceReduction.maxTenantCnPerServer)}；DN 总上限 ${sizing.maxDnPerServer}，同租户 DN 有效上限 ${data.resourceReduction.maxTenantDnPerServer}。`
+        : "关闭实例数量策略限制，仍执行资源水位、租户隔离、同 Group 副本跨机及浏览器规模保护。"]);
+  }
+  data.tenantPlans.forEach(t=>(t.cnWorkloads||[]).forEach(w=>summaryRows.push([
+    `${displayTenantKey(getTenantKey(t),data.tenantPlans)} ${w.label} CN`,
+    `${w.count}/生产AZ；${w.cores}物理核/${w.memoryGb}GB`,w.reason
+  ])));
+  getDnPrimaryDistribution(data).forEach(item => summaryRows.push(["中心内主分布", `${displayTenantKey(item.tenant, data.tenantPlans)} / ${item.az}`, item.text]));
+  (data.centerQuotaAudit || []).forEach(site => summaryRows.push(["中心主机配额", site.az,
+    `需求 ${site.required} / 现有 ${site.available} / 已分配 ${site.assigned} / 缺口 ${site.missing} 台`]));
   const summarySheet = buildExcelTableSheet({
     name: "方案摘要",
     title: "GoldenDB 方案摘要",
@@ -5223,7 +5588,7 @@ function buildExcelSheets(data) {
     dataRows: summaryRows,
     widths: [24, 32, 72],
     rowStyle(values, index, defaultStyles) {
-      if (index === summaryRows.length - 1) defaultStyles[1] = redlines.length ? excelStyles.risk : excelStyles.pass;
+      if (values[0] === "红线结论") defaultStyles[1] = redlines.length ? excelStyles.risk : excelStyles.pass;
       return defaultStyles;
     }
   });
@@ -5253,7 +5618,7 @@ function buildExcelSheets(data) {
     tenant.gtmGroupText,
     tenant.cnSpecLabel || `${tenant.cnCores}C/${tenant.cnMemoryGb}GB`,
     tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`,
-    tenant.cnBelowMinimum || tenant.shardBelowMinimum ? "未通过" : "通过",
+    tenant.cnBelowMinimum || tenant.shardBelowMinimum ? "未通过" : tenant.workloadIssues?.length ? "需复核" : "通过",
     tenant.tenantId,
     tenant.plannedTxnTps === undefined ? "未评估" : Number(round(tenant.plannedTxnTps)),
     dnPrimaryLabels[tenant.primaryStrategy || "balanced"]
@@ -5323,14 +5688,17 @@ function buildExcelSheets(data) {
     displayTenantKey(parseCnTenant(role) || parseDnPlacementRole(role)?.tenant || (/^(.*)-GTM\d+$/.exec(role)?.[1]) || "集群管理域", data.tenantPlans),
     isCnRole(role) ? "CN" : isDnRole(role) ? "DN" : isGtmRole(role) ? "GTM" : "管理节点",
     formatExcelRole(role, data.tenantPlans),
-    role
+    role,
+    getRoleResourceDemand(role,data.tenantPlans).cpu,
+    getRoleResourceDemand(role,data.tenantPlans).memory,
+    getRoleResourceDemand(role,data.tenantPlans).disk
   ])));
   const instanceSheet = buildExcelTableSheet({
     name: "组件实例",
     title: "GoldenDB 组件实例明细",
-    headers: ["服务器", "中心/AZ", "机柜", "资源池", "租户/系统域", "组件类型", "实例名称", "实例ID"],
+    headers: ["服务器", "中心/AZ", "机柜", "资源池", "租户/系统域", "组件类型", "实例名称", "实例ID", "实例物理核", "实例内存GB", "规划数据TB"],
     dataRows: instanceRows,
-    widths: [14, 14, 14, 28, 20, 14, 30, 28],
+    widths: [14, 14, 14, 28, 20, 14, 30, 28, 16, 16, 16],
     rowStyle(values, index, defaultStyles) {
       const componentStyle = values[5] === "CN" ? excelStyles.cnComponent
         : values[5] === "DN" ? excelStyles.dnComponent
@@ -5343,6 +5711,10 @@ function buildExcelSheets(data) {
   });
 
   const riskRows = [];
+  getDnPrimaryDistribution(data).forEach(item => riskRows.push([
+    "主角色分布", item.incomplete || item.spread > 1 ? "提示" : "通过",
+    `${displayTenantKey(item.tenant, data.tenantPlans)} / ${item.az}`, item.text
+  ]));
   const displayedRisks = [...document.querySelectorAll("#riskList li")].map((item) => ({
     level: item.classList.contains("risk-high") ? "高风险" : item.classList.contains("risk-mid") ? "提示" : "通过",
     text: item.textContent.trim()
@@ -5836,7 +6208,7 @@ function bindParameterEvents() {
     if (event.target.matches(".tenant-input")) {
       const update = updateTenantSpec(event.target);
       if (!update) return;
-      if (["type", "deploymentStrategy"].includes(update.key)) {
+      if (["type", "deploymentStrategy", "workloadMode", "cnSizingMode", "dnSizingMode", "batchSizingMode", "batchRateMode"].includes(update.key)) {
         render();
         return;
       }
@@ -5925,18 +6297,19 @@ function updateTenantSpec(input) {
 
 function syncBusinessTenantAutoValues(index = null) {
   if (getPlanningInputIssues("business").length) return;
+  const enhanced = businessTenantSpecs.some(hasWorkloadSettings) ? calculate().tenantPlans : null;
   const tenants = index === null
     ? businessTenantSpecs.map((tenant, tenantIndex) => ({ tenant, tenantIndex }))
     : [{ tenant: businessTenantSpecs[index], tenantIndex: index }];
   tenants.forEach(({ tenant, tenantIndex }) => {
     if (!tenant) return;
     if (!tenant.cnPerAzManual) {
-      tenant.cnPerAz = calculateSuggestedCnPerAz(tenant);
+      tenant.cnPerAz = enhanced?.[tenantIndex]?.cnPerAz ?? calculateSuggestedCnPerAz(tenant);
       const cnField = document.querySelector(`.tenant-input[data-mode="business"][data-index="${tenantIndex}"][data-key="cnPerAz"]`);
       if (cnField && document.activeElement !== cnField) cnField.value = tenant.cnPerAz;
     }
     if (!tenant.minShardsManual) {
-      tenant.minShards = calculateSuggestedMinShards(tenant);
+      tenant.minShards = enhanced?.[tenantIndex]?.shardCount ?? calculateSuggestedMinShards(tenant);
       const shardField = document.querySelector(`.tenant-input[data-mode="business"][data-index="${tenantIndex}"][data-key="minShards"]`);
       if (shardField && document.activeElement !== shardField) shardField.value = tenant.minShards;
     }
@@ -6042,6 +6415,32 @@ $("downloadExcelBtn").addEventListener("click", downloadExcelPlan);
 $("downloadTopologyBtn").addEventListener("click", () => downloadTopologyImage("topology", "downloadTopologyBtn", "goldendb-network-plan"));
 $("downloadServerTopologyBtn").addEventListener("click", () => downloadTopologyImage("serverTopology", "downloadServerTopologyBtn", "goldendb-server-plan"));
 
+function initializePocControls() {
+  for (const prefix of ["business", "reverse"]) {
+    const status = $(`${prefix}DnDensityStatus`);
+    status.insertAdjacentHTML("beforebegin", `<div id="${prefix}PocDensitySettings" class="hidden">
+      <h3>POC 实例密度</h3>
+      <label class="toggle"><input id="${prefix}DensityEnabled" type="checkbox" checked><span>启用实例数量上限（不替代资源水位）</span></label>
+      <div class="grid-two">
+        <label class="field"><span>单机 CN 总上限（所有租户，0 跟随机型）</span><input id="${prefix}PocCnLimit" type="number" min="0" max="2000" step="1" value="0"></label>
+        <label class="field"><span>单机 DN 总上限（所有租户，0 跟随机型）</span><input id="${prefix}PocDnLimit" type="number" min="0" max="2000" step="1" value="0"></label>
+        <label class="field"><span>单机同租户 CN 上限（0 跟随总上限）</span><input id="${prefix}PocTenantCnLimit" type="number" min="0" max="2000" step="1" value="0"></label>
+      </div></div>`);
+    for (const suffix of ["DensityEnabled", "PocCnLimit", "PocDnLimit", "PocTenantCnLimit"]) {
+      const id = `${prefix}${suffix}`;
+      inputs.push(id);
+      defaults[id] = suffix === "DensityEnabled" ? true : 0;
+    }
+  }
+  $("businessServerConfigMode").closest("label").insertAdjacentHTML("afterend", `<label class="field"><span>宿主机型来源</span><select id="businessHostModelSource">
+    <option value="component">各组件分别选型</option>
+    ${componentServerDefinitions.map(d => `<option value="${d.key}">统一采用 ${d.label} 机型</option>`).join("")}
+    </select></label>`);
+  inputs.push("businessHostModelSource");
+  defaults.businessHostModelSource = "component";
+}
+
 renderComponentMachineEditor();
+initializePocControls();
 bindParameterEvents();
 render();
