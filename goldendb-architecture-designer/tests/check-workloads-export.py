@@ -1,11 +1,12 @@
 """Validate actual workload export against the application workbook model."""
 import json
+import os
 from pathlib import Path
 import zipfile
 import xml.etree.ElementTree as ET
 import openpyxl
 
-root = Path(__file__).resolve().parents[2] / 'outputs/goldendb-remediation-20260906/workloads/evidence'
+root = Path(os.environ.get('REMEDIATION_TEST_OUTPUT', Path(__file__).resolve().parents[2] / 'outputs/goldendb-remediation-20260906/workloads/evidence'))
 expected = json.loads((root / 'sheets.json').read_text())
 workbook = openpyxl.load_workbook(root / 'workloads.xlsx')
 assert workbook.sheetnames == [sheet['name'] for sheet in expected]

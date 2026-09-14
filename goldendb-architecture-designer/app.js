@@ -308,7 +308,7 @@ function getPlanningInputIssues(module = $("designModule").value) {
       ? { cnPerAz: [1, true], cnCores: [1, true], cnMemoryGb: [1, true], dnCores: [1, true], dnMemoryGb: [1, true] }
       : { qps: [1, true], dataTb: [0.1, false] };
     if (module === "reverse" && tenant.type !== "centralized") rules.shardCount = [1, true];
-    if (module === "business" && tenant.cnPerAzManual) rules.cnPerAz = [1, true];
+    if (module === "business" && tenant.cnPerAzManual && tenant.workloadMode !== "split") rules.cnPerAz = [1, true];
     if (module === "business" && tenant.minShardsManual && $("dbShape").value === "distributed" && tenant.type === "distributed") rules.minShards = [1, true];
     rules.replicaCount = [1, true, 7];
     const labels = { qps: "SQL QPS", dataTb: "数据量 TB", cnPerAz: "CN/AZ", minShards: "DN Group", shardCount: "DN Group", replicaCount: "每分片副本数", cnCores: "CN 核数", cnMemoryGb: "CN 内存", dnCores: "DN 核数", dnMemoryGb: "DN 内存" };
@@ -594,7 +594,10 @@ function calculate() {
 
   const growthPower = Math.pow(growthFactor, years);
   const transactionGrowthPower = Math.pow(transactionGrowthFactor, years);
-  const cnPlanningCores = getCnFittingCores(componentSpecs.cn, reserveRatio, cpuCores);
+  const allCnSpecsManual = businessTenantSpecs.every(tenant => tenant.cnSizingMode === "manual"
+    && (tenant.workloadMode !== "split" || tenant.batchSizingMode === "manual"));
+  // Manual instance sizes are checked during placement, not against the automatic 2GB/core heuristic.
+  const cnPlanningCores = allCnSpecsManual ? cpuCores : getCnFittingCores(componentSpecs.cn, reserveRatio, cpuCores);
   const cnSingleNodeTps = singleCoreTps * cnPlanningCores * cpuLimit;
   const azCount = getAzCount(mode);
   const siteCapacityFactors = getSiteCapacityFactors(mode, drCapacityRatio);
@@ -2837,7 +2840,7 @@ function buildBusinessTenantPlans(data) {
     const plannedTxnTps = businessTxnTps * data.transactionGrowthPower;
     const cnRaw = Math.ceil(plannedTxnTps / data.cnSingleNodeTps);
     const recommendedCnPerAz = maybeEven(Math.max(2, cnRaw), data.forceEven);
-    const cnPerAz = spec.cnPerAzManual
+    const cnPerAz = spec.cnPerAzManual && spec.workloadMode !== "split"
       ? Math.max(1, Math.floor(Number(spec.cnPerAz) || 1))
       : recommendedCnPerAz;
     const shardByCapacity = Math.ceil(futureDataTb / data.maxShardTb);
@@ -3014,7 +3017,9 @@ function applyWorkloadSettings(plan, spec, data) {
   const makeCn = (key, target, unit, k, water, growth, manual, cores, memory, count) => {
     const label = key === "batch" ? "跑批" : split ? "在线" : "业务";
     k = workloadNumber(k, `${label}单核吞吐标定`, Number.MIN_VALUE);
-    water = workloadNumber(water, `${label}CPU水位`, 0.01, false, 1);
+    const calibrationMode = split ? (spec[`${key}CalibrationMode`] ?? "raw") : "raw";
+    if (!["raw", "safe"].includes(calibrationMode)) throw new PlanningInputError(`${label}标定口径无效`);
+    water = calibrationMode === "safe" ? 1 : workloadNumber(water, `${label}CPU水位`, 0.01, false, 1);
     target *= growth;
     const planningCores = manual ? workloadNumber(cores, `${label}CN物理核`, 1, true, 2000) : data.cpuCores;
     const recommended = maybeEven(Math.max(2, Math.ceil(target / (k * water * planningCores))), data.forceEven);
@@ -3025,9 +3030,9 @@ function applyWorkloadSettings(plan, spec, data) {
     const m = manual ? workloadNumber(memory, `${label}CN内存`, 1) : auto.memoryGb;
     const capacity = c * k * water * n;
     if (capacity < target || n < 2) issues.push(`${label} CN ${n} 个/生产AZ，安全初算 ${round(capacity)}/${round(target)} ${unit}；性能或至少两实例规则不满足。`);
-    return {key, label, unit, target, k, water, cores:c, memoryGb:m, count:n, recommended, capacity,
+    return {key, label, unit, target, k, water, calibrationMode, cores:c, memoryGb:m, count:n, manualCount:count > 0, recommended, capacity,
       cnByAz:data.siteCapacityFactors.map(f=>Math.max(1,Math.ceil(n*f))),
-      reason:`${label}：目标 ${round(target)} ${unit}，单核标定 ${k} × 水位 ${water}；每生产AZ ${n} × ${c}物理核/${m}GB，安全初算 ${round(capacity)} ${unit}。${manual ? "手动规格不自动抬高。" : "内存按现有2GB/核初算，需压测。"}`};
+      reason:`${label}：目标 ${round(target)} ${unit}，单核标定 ${k} ${calibrationMode === "safe" ? "（输入声明已含安全水位，不重复折减；系数1不表示CPU使用率100%，须有匹配实测依据）" : `× 水位 ${water}`}；每生产AZ ${n} × ${c}物理核/${m}GB，安全初算 ${round(capacity)} ${unit}。${manual ? "手动规格不自动抬高。" : "内存按现有2GB/核初算，需压测。"}`};
   };
   const onlineT = split ? workloadNumber(spec.onlineSqlPerTxn, "在线每事务SQL数", 1) : data.sqlPerTxn;
   const onlineGrowth = split ? Math.pow(workloadNumber(spec.onlineGrowth, "在线增长系数", 1), numberValue("years")) : data.transactionGrowthPower;
@@ -3076,6 +3081,7 @@ function applyWorkloadSettings(plan, spec, data) {
   }));
   const c = manualDn ? dnCores : dn.cores, m = manualDn ? dnMemory : dn.memoryGb;
   return {...plan, cnWorkloads:workloads, cnRoleSpecs, workloadIssues:issues, workloadMode:split?"split":"single",
+    cnManual:workloads.some(w=>w.manualCount),
     cnPerAz:workloads.reduce((n,w)=>n+w.count,0), recommendedCnPerAz:workloads.reduce((n,w)=>n+w.recommended,0),
     cnByAz,totalCn:cnRoleSpecs.length,cnCores:online.cores,cnMemoryGb:online.memoryGb,
     cnCpuDemand:cnRoleSpecs.reduce((n,r)=>n+r.cores,0),cnMemoryDemand:cnRoleSpecs.reduce((n,r)=>n+r.memoryGb,0),
@@ -3406,6 +3412,7 @@ function renderBusinessTenantEditor() {
 
 function renderWorkloadEditor(t, index) {
   const defaults = {workloadMode:"single",cnSizingMode:"auto",dnSizingMode:"auto",onlineSqlPerTxn:Number($("sqlPerTxn").value)||20,
+    onlineCalibrationMode:"raw",batchCalibrationMode:"raw",
     onlineCoreTps:Number($("singleCoreTps").value)||50,onlineCpuLimit:Number($("cpuLimit").value)||0.7,onlineGrowth:Number($("transactionGrowthFactor").value)||1,onlineCount:0,
     batchRateMode:"qps",batchRate:"",batchSqlPerTxn:20,batchCoreTps:"",batchCpuLimit:0.7,batchGrowth:1,batchCount:0,
     batchSizingMode:"auto",batchCores:16,batchMemoryGb:64,batchAmount:"",batchWindow:"",jointDnTps:0};
@@ -3413,6 +3420,7 @@ function renderWorkloadEditor(t, index) {
   const input=(key,label,min=1,step="any")=>`<label class="field"><span>${label}</span><input class="tenant-input" data-mode="business" data-index="${index}" data-key="${key}" type="number" min="${min}" step="${step}" value="${escapeAttr(t[key]??"")}"></label>`;
   const select=(key,label,options)=>`<label class="field"><span>${label}</span><select class="tenant-input" data-mode="business" data-index="${index}" data-key="${key}">${options.map(([v,l])=>`<option value="${v}" ${t[key]===v?"selected":""}>${l}</option>`).join("")}</select></label>`;
   const modeOptions=[["auto","自动推荐"],["manual","手动指定"]];
+  const calibrationOptions=[["raw","待乘CPU水位"],["safe","已含安全水位"]];
   return `<div class="workload-settings">
     ${select("workloadMode","CN 业务场景",[["single","单场景（兼容原方案）"],["split","在线 + 跑批（同租户独立CN）"]])}
     <div class="grid-two">${select("cnSizingMode",t.workloadMode==="split"?"在线单CN规格":"单CN规格",modeOptions)}
@@ -3421,14 +3429,16 @@ function renderWorkloadEditor(t, index) {
       ${t.dnSizingMode==="manual"?input("dnCores","单DN物理核",1,"1")+input("dnMemoryGb","单DN内存GB"):""}</div>
     ${t.workloadMode==="split"?`<h4>在线 CN</h4><div class="grid-two">
       ${input("onlineSqlPerTxn","在线每事务SQL数")}${input("onlineCoreTps","在线单核TPS标定")}
-      ${input("onlineCpuLimit","在线CPU水位",0.01)}${input("onlineGrowth","在线年增长系数")}
+      ${select("onlineCalibrationMode","在线标定口径",calibrationOptions)}
+      ${t.onlineCalibrationMode==="safe"?"":input("onlineCpuLimit","在线CPU水位",0.01)}${input("onlineGrowth","在线年增长系数")}
       ${input("onlineCount","在线CN/生产AZ（0自动）",0,"1")}</div>
       <h4>跑批 CN</h4><div class="grid-two">
       ${select("batchRateMode","跑批性能输入口径",[["qps","SQL QPS"],["tps","数据库事务TPS"],["work","业务处理量 / 有效时间"]])}
       ${t.batchRateMode==="work"?input("batchAmount","业务处理总量")+input("batchWindow","有效并行窗口（小时）",0.001):input("batchRate","跑批目标 "+(t.batchRateMode==="qps"?"SQL QPS":"TPS"))}
       ${t.batchRateMode==="qps"?input("batchSqlPerTxn","跑批每事务SQL数（匹配实际模型）"):""}
       ${input("batchCoreTps",t.batchRateMode==="work"?"跑批单核业务单位/秒（需标定）":"跑批单核TPS（需独立标定）")}
-      ${input("batchCpuLimit","跑批CPU水位",0.01)}${input("batchGrowth","跑批年增长系数")}
+      ${select("batchCalibrationMode","跑批标定口径",calibrationOptions)}
+      ${t.batchCalibrationMode==="safe"?"":input("batchCpuLimit","跑批CPU水位",0.01)}${input("batchGrowth","跑批年增长系数")}
       ${input("batchCount","跑批CN/生产AZ（0自动）",0,"1")}${select("batchSizingMode","跑批单CN规格",modeOptions)}
       ${t.batchSizingMode==="manual"?input("batchCores","跑批单CN物理核",1,"1")+input("batchMemoryGb","跑批单CN内存GB"):""}
       ${input("jointDnTps","共享DN等效规划TPS（0未评估）",0)}</div>`:""}
@@ -3764,7 +3774,7 @@ function renderRisks(data) {
     risks.push(["risk-mid", "三地五中心公开细节有限，页面仅提供设计建议，需厂商方案评审。"]);
   }
   data.tenantPlans.forEach((tenant) => {
-    if (tenant.cnBelowMinimum) {
+    if (tenant.cnBelowMinimum && !tenant.cnWorkloads) {
       risks.push(["risk-high", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 每生产 AZ ${tenant.cnPerAz} 个 CN，最终规格安全能力 ${round(tenant.cnSafeTpsPerAz)} TPS，目标 ${round(tenant.cnTargetTps)} TPS；未满足性能目标或当前至少 2 个 CN 的冗余规则，请增加节点或调整标定规格。`]);
     }
     if (tenant.shardBelowMinimum) {
@@ -4136,7 +4146,7 @@ function getResourceReductionRedlines(data) {
   const tenantResourcePoolAudit = data.reverse ? data.tenantResourcePoolAudit : data.serverSizing.tenantResourcePoolAudit;
   const gtmGroupPlacementAudit = data.reverse ? data.gtmGroupPlacementAudit : data.serverSizing.gtmGroupPlacementAudit;
   if (!data.reverse) {
-    data.tenantPlans.filter((tenant) => tenant.cnBelowMinimum).forEach((tenant) => {
+    data.tenantPlans.filter((tenant) => tenant.cnBelowMinimum && !tenant.cnWorkloads).forEach((tenant) => {
       redlines.push(`${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 单 AZ CN=${tenant.cnPerAz}，安全能力 ${round(tenant.cnSafeTpsPerAz)}/${round(tenant.cnTargetTps)} TPS；性能或至少 2 个 CN 的冗余规则未通过。`);
     });
     data.tenantPlans.filter((tenant) => tenant.shardBelowMinimum).forEach((tenant) => {
@@ -6208,7 +6218,7 @@ function bindParameterEvents() {
     if (event.target.matches(".tenant-input")) {
       const update = updateTenantSpec(event.target);
       if (!update) return;
-      if (["type", "deploymentStrategy", "workloadMode", "cnSizingMode", "dnSizingMode", "batchSizingMode", "batchRateMode"].includes(update.key)) {
+      if (["type", "deploymentStrategy", "workloadMode", "cnSizingMode", "dnSizingMode", "batchSizingMode", "batchRateMode", "onlineCalibrationMode", "batchCalibrationMode"].includes(update.key)) {
         render();
         return;
       }

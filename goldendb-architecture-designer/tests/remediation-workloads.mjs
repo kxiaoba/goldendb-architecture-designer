@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {chromium} from '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs';
-const out=path.resolve('outputs/goldendb-remediation-20260906/workloads/evidence');fs.mkdirSync(out,{recursive:true});
+const out=path.resolve(process.env.REMEDIATION_TEST_OUTPUT || 'outputs/goldendb-remediation-20260906/workloads/evidence');fs.mkdirSync(out,{recursive:true});
 const browser=await chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({viewport:{width:1600,height:1100}});
 const results=[],errors=[];page.on('pageerror',e=>errors.push(e.message));
 try{
@@ -58,7 +58,49 @@ try{
    &&hosts.every(h=>d.tenantPlans.every(t=>h.roles.filter(r=>parseCnTenant(r)===getTenantKey(t)).length<=1))
    &&hosts.reduce((n,h)=>n+h.roles.filter(isCnRole).length,0)===72};
  }));
- await setup();
+ for(const value of ['',-1,1000000]){
+  await setup();results.push(await page.evaluate(value=>{
+   Object.assign(businessTenantSpecs[0],{cnPerAzManual:true,cnPerAz:value});render();
+   const d=latestDesignData;
+   return {name:'hidden-legacy-count-'+value,pass:!!d&&d.tenantPlans[0].cnPerAz===7&&!d.tenantPlans[0].cnManual&&businessTenantSpecs[0].cnPerAz===value};
+  },value));
+ }
+ await setup();results.push(await page.evaluate(()=>{
+  const t=businessTenantSpecs[0];Object.assign(t,{cnPerAzManual:true,cnPerAz:'',workloadMode:'single'});render();
+  return {name:'single-restores-count-validation',pass:!latestDesignData&&$('downloadExcelBtn').disabled&&t.cnPerAz===''};
+ }));
+ await setup();results.push(await page.evaluate(()=>{
+  businessTenantSpecs[0].batchCount=1;render();const d=latestDesignData,t=d.tenantPlans[0],red=getResourceReductionRedlines(d);
+  return {name:'batch-manual-label-and-units',pass:t.cnManual&&t.cnBelowMinimum
+   &&red.some(x=>x.includes('跑批 CN 1')&&x.includes('5000')&&x.includes('业务单位/秒'))
+   &&!red.some(x=>x.includes('单 AZ CN='))};
+ }));
+ for(const key of ['online','batch']){
+  await setup();results.push(await page.evaluate(key=>{
+   const t=businessTenantSpecs[0],before=latestDesignData.tenantPlans[0].cnWorkloads.find(w=>w.key===key);
+   t[key+'CoreTps']=before.k*before.water;t[key+'CalibrationMode']='safe';t[key+'CpuLimit']='';render();
+   const d=latestDesignData,after=d.tenantPlans[0].cnWorkloads.find(w=>w.key===key);
+   return {name:'equivalent-safe-calibration-'+key,pass:after.capacity===before.capacity&&after.count===before.count
+    &&after.cores===before.cores&&after.memoryGb===before.memoryGb&&after.water===1
+    &&getResourceReductionRedlines(d).some(x=>x.includes('混合性能未评估'))};
+  },key));
+ }
+ await setup();await page.locator('[data-key="batchCalibrationMode"]').selectOption('safe');
+ results.push(await page.evaluate(()=>{
+  const w=latestDesignData.tenantPlans[0].cnWorkloads[1];
+  return {name:'safe-mode-no-double-discount',pass:w.count===4&&w.capacity===6400
+   &&!document.querySelector('[data-key="batchCpuLimit"]')&&businessTenantSpecs[0].batchCpuLimit===.7
+   &&w.reason.includes('不重复折减')};
+ }));
+ await page.locator('[data-key="batchCalibrationMode"]').selectOption('raw');
+ results.push(await page.evaluate(()=>({name:'restore-raw-watermark',pass:latestDesignData.tenantPlans[0].cnWorkloads[1].count===5
+  &&document.querySelector('[data-key="batchCpuLimit"]').value==='0.7'})));
+ for(const key of ['online','batch']){
+  await setup();results.push(await page.evaluate(key=>{
+   businessTenantSpecs[0][key+'CalibrationMode']='unknown';render();return {name:'invalid-calibration-'+key,pass:!latestDesignData&&$('downloadExcelBtn').disabled};
+  },key));
+ }
+ await setup();await page.locator('[data-key="batchCalibrationMode"]').selectOption('safe');
  fs.writeFileSync(path.join(out,'sheets.json'),JSON.stringify(await page.evaluate(()=>buildExcelSheets(latestDesignData))));
  for(const [id,name] of [['downloadExcelBtn','workloads.xlsx'],['downloadTopologyBtn','network.png'],['downloadServerTopologyBtn','servers.png']]){
   const wait=page.waitForEvent('download');await page.locator('#'+id).click();const d=await wait;await d.saveAs(path.join(out,name));results.push({name,pass:fs.statSync(path.join(out,name)).size>1000});
