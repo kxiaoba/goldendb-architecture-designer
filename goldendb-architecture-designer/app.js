@@ -1,4 +1,6 @@
 const $ = (id) => document.getElementById(id);
+const instanceCoreTiers = [8, 16, 32, 64, 96, 128, 256];
+const cnMemoryPerCoreGb = 4;
 
 const componentServerDefinitions = [
   { key: "cn", label: "CN 计算节点", purpose: "CPU 与内存优先，承载 SQL 解析、路由和执行", sockets: 2, cores: 64, memoryGb: 256, dataDiskTb: 1.92, dataDiskCount: 1, maxInstances: 2 },
@@ -239,7 +241,7 @@ componentServerDefinitions.forEach((definition) => {
 });
 
 const defaultBusinessTenants = [
-  { name: "租户1", type: "distributed", deploymentStrategy: "shared", qps: 100000, dataTb: 3, cnPerAz: 2, cnPerAzManual: false, minShards: 2, minShardsManual: false, replicaCount: 4, cnCores: 8, cnMemoryGb: 16, dnCores: 16, dnMemoryGb: 64 }
+  { name: "租户1", type: "distributed", deploymentStrategy: "shared", qps: 100000, dataTb: 3, cnPerAz: 2, cnPerAzManual: false, minShards: 2, minShardsManual: false, replicaCount: 4, cnCores: 8, cnMemoryGb: 32, dnCores: 16, dnMemoryGb: 64 }
 ];
 
 const defaultReverseTenants = [
@@ -596,7 +598,7 @@ function calculate() {
   const transactionGrowthPower = Math.pow(transactionGrowthFactor, years);
   const allCnSpecsManual = businessTenantSpecs.every(tenant => tenant.cnSizingMode === "manual"
     && (tenant.workloadMode !== "split" || tenant.batchSizingMode === "manual"));
-  // Manual instance sizes are checked during placement, not against the automatic 2GB/core heuristic.
+  // Manual sizes retain their own memory budget; automatic sizes use the configured planning ratio.
   const cnPlanningCores = allCnSpecsManual ? cpuCores : getCnFittingCores(componentSpecs.cn, reserveRatio, cpuCores);
   const cnSingleNodeTps = singleCoreTps * cnPlanningCores * cpuLimit;
   const azCount = getAzCount(mode);
@@ -2996,9 +2998,9 @@ function buildReverseTenantPlans(data) {
 }
 
 function getCnFittingCores(spec, reserveRatio, requestedCores) {
-  const limit = Math.floor(Math.min(requestedCores, spec.cores * (1 - reserveRatio), spec.memoryGb * (1 - reserveRatio) / 2));
-  if (limit < 1) throw new PlanningInputError("CN 服务器扣除预留后不足 1 物理核或 2GB 内存，无法放入 CN 实例；请调整机型或预留。");
-  return [64, 32, 16, 8].find((cores) => cores <= limit) || limit;
+  const limit = Math.floor(Math.min(requestedCores, spec.cores * (1 - reserveRatio), spec.memoryGb * (1 - reserveRatio) / cnMemoryPerCoreGb));
+  if (limit < 1) throw new PlanningInputError("CN 服务器扣除预留后不足 1 物理核或 4GB 内存，无法放入自动 CN 实例；请调整机型或预留。");
+  return [...instanceCoreTiers].reverse().find((cores) => cores <= limit) || limit;
 }
 
 function hasWorkloadSettings(spec) {
@@ -3009,6 +3011,27 @@ function workloadNumber(value, label, min = 0, integer = false, max = Number.MAX
   const error = numericInputError(value, label, { min, max, integer });
   if (error) throw new PlanningInputError(error);
   return Number(value);
+}
+
+function assessBatchWindow(batch, spec) {
+  const efficiency = workloadNumber(spec.batchEfficiency, "跑批并行效率", Number.MIN_VALUE, false, 1);
+  const lost = workloadNumber(spec.batchLostCn, "跑批不可用CN数", 0, true, 2000);
+  const pauseSeconds = workloadNumber(spec.batchPauseMinutes, "跑批停顿分钟", 0) * 60;
+  const retryRatio = workloadNumber(spec.batchRetryRatio, "跑批额外重试工作量比例", 0);
+  const windowSeconds = workloadNumber(spec.batchWindow, "有效跑批窗口小时", Number.MIN_VALUE) * 3600;
+  const work = batch.target * windowSeconds * (1 + retryRatio);
+  if (![work, pauseSeconds, windowSeconds].every(Number.isFinite)) throw new PlanningInputError("跑批窗口计算超出有效数值范围");
+  const perNode = batch.cores * batch.k * batch.water * efficiency;
+  const remaining = Math.max(0, batch.count - lost);
+  const availableSeconds = Math.max(0, windowSeconds - pauseSeconds);
+  const throughput = remaining * perNode;
+  const seconds = throughput > 0 ? work / throughput + pauseSeconds : null;
+  const requiredCount = availableSeconds > 0 ? Math.ceil(work / availableSeconds / perNode) + lost : null;
+  if (!(perNode > 0) || !Number.isFinite(throughput) || (seconds !== null && !Number.isFinite(seconds))
+    || (requiredCount !== null && !Number.isSafeInteger(requiredCount))) throw new PlanningInputError("跑批窗口估算超出有效数值范围，请复核效率、窗口和工作量");
+  const withinWindow = seconds !== null && seconds <= windowSeconds;
+  return {efficiency, lost, pauseSeconds, retryRatio, windowSeconds, work, throughput, seconds, requiredCount, withinWindow,
+    reason:`跑批窗口校验（每生产AZ，当前规格固定）：${batch.count} CN，整个窗口持续不可用 ${lost} CN；并行效率 ${efficiency}，额外重试工作量 ${round(retryRatio * 100)}%，停顿 ${round(pauseSeconds / 60)} 分钟。剩余吞吐 ${round(throughput)} 业务单位/秒，估计完成 ${seconds === null ? "无法完成（无剩余吞吐）" : `${round(seconds / 3600)}小时`} / 窗口 ${round(windowSeconds / 3600)}小时；按此假设所需CN ${requiredCount === null ? "无法估计（无可用窗口）" : requiredCount} 个，不自动改变规划数量。${withinWindow ? "仅此窗口算式满足" : "窗口不足"}；线性工程估算不代表实测，效率不得重复包含标定已计入的同类折减，任务依赖及共享DN/GTM另需验证。`};
 }
 
 function applyWorkloadSettings(plan, spec, data) {
@@ -3032,7 +3055,7 @@ function applyWorkloadSettings(plan, spec, data) {
     if (capacity < target || n < 2) issues.push(`${label} CN ${n} 个/生产AZ，安全初算 ${round(capacity)}/${round(target)} ${unit}；性能或至少两实例规则不满足。`);
     return {key, label, unit, target, k, water, calibrationMode, cores:c, memoryGb:m, count:n, manualCount:count > 0, recommended, capacity,
       cnByAz:data.siteCapacityFactors.map(f=>Math.max(1,Math.ceil(n*f))),
-      reason:`${label}：目标 ${round(target)} ${unit}，单核标定 ${k} ${calibrationMode === "safe" ? "（输入声明已含安全水位，不重复折减；系数1不表示CPU使用率100%，须有匹配实测依据）" : `× 水位 ${water}`}；每生产AZ ${n} × ${c}物理核/${m}GB，安全初算 ${round(capacity)} ${unit}。${manual ? "手动规格不自动抬高。" : "内存按现有2GB/核初算，需压测。"}`};
+      reason:`${label}：每个生产AZ独立承载目标 ${round(target)} ${unit}，不按AZ数均摊；单核标定 ${k} ${calibrationMode === "safe" ? "（输入声明已含安全水位，不重复折减；系数1不表示CPU使用率100%，须有匹配实测依据）" : `× 水位 ${water}`}；每生产AZ ${n} × ${c}物理核/${m}GB，安全初算 ${round(capacity)} ${unit}。${manual ? "手动规格不自动抬高。" : "内存按4GB/物理核初算，需压测。"}`};
   };
   const onlineT = split ? workloadNumber(spec.onlineSqlPerTxn, "在线每事务SQL数", 1) : data.sqlPerTxn;
   const onlineGrowth = split ? Math.pow(workloadNumber(spec.onlineGrowth, "在线增长系数", 1), numberValue("years")) : data.transactionGrowthPower;
@@ -3051,6 +3074,11 @@ function applyWorkloadSettings(plan, spec, data) {
       Math.pow(workloadNumber(spec.batchGrowth, "跑批增长系数", 1), numberValue("years")),
       spec.batchSizingMode === "manual", spec.batchCores, spec.batchMemoryGb,
       workloadNumber(spec.batchCount, "跑批CN数量", 0, true, 2000));
+    if (mode === "work" && spec.batchWindowCheck === true) {
+      batch.windowAudit = assessBatchWindow(batch, spec);
+      batch.reason += ` ${batch.windowAudit.reason}`;
+      if (!batch.windowAudit.withinWindow) issues.push(batch.windowAudit.reason);
+    }
     workloads.push(batch);
     issues.push("在线/跑批 CN 为独立计算组但共享 DN/GTM：线性吞吐尚需同SQL、同并发、多CN压测及故障重试窗口验证，不能据此承诺跑批完成时限。");
   }
@@ -3106,15 +3134,15 @@ function recommendCnNodeSpec(data) {
   });
   const safePerCore = data.singleCoreTps * data.cpuLimit;
   const requiredCores = Math.ceil(perCnTps / safePerCore);
-  const cores = [8, 16, 32, 64].find((value) => value >= requiredCores && value <= data.maxCores)
+  const cores = instanceCoreTiers.find((value) => value >= requiredCores && value <= data.maxCores)
     || data.maxCores;
   const safeTps = cores * safePerCore;
   return {
     cores,
-    memoryGb: cores * 2,
+    memoryGb: cores * cnMemoryPerCoreGb,
     safeTps,
-    label: `${cores}C / ${cores * 2}GB`,
-    reason: `单 CN 目标 ${round(perCnTps)} TPS；所需物理核 = CEIL(${round(perCnTps)} / (${data.singleCoreTps} × ${data.cpuLimit})) = ${requiredCores}；配置 ${cores} 核，安全能力 ${round(safeTps)} TPS。内存按现有 2GB/核估算，须压测确认。`
+    label: `${cores}C / ${cores * cnMemoryPerCoreGb}GB`,
+    reason: `每个生产 AZ 独立需求 ${round(data.tenantTxnTps)} TPS，不按 AZ 数均摊；本 AZ 内 ${data.cnPerAz} 个 CN 分担，每个目标 ${round(perCnTps)} TPS。所需物理核 = CEIL(${round(perCnTps)} / (${data.singleCoreTps} × ${data.cpuLimit})) = ${requiredCores}；配置 ${cores} 核/${cores * cnMemoryPerCoreGb}GB，单 CN 安全初算 ${round(safeTps)} TPS。内存按 4GB/物理核估算，须压测确认。`
   };
 }
 
@@ -3128,7 +3156,7 @@ function recommendDnNodeSpec(data) {
   const memoryPerCore = referenceMemoryGb / referenceCores;
   const minimumCores = Math.min(8, referenceCores);
   const rawCores = Math.max(minimumCores, Math.ceil(perShardTps / tpsPerCore));
-  const supportedCoreTiers = [...new Set([8, 16, 32, 64, referenceCores])]
+  const supportedCoreTiers = [...new Set([...instanceCoreTiers, referenceCores])]
     .filter((cores) => cores >= minimumCores && cores <= referenceCores)
     .sort((a, b) => a - b);
   const standardCores = supportedCoreTiers.find((cores) => cores >= rawCores) || referenceCores;
@@ -3411,13 +3439,14 @@ function renderBusinessTenantEditor() {
 }
 
 function renderWorkloadEditor(t, index) {
-  const defaults = {workloadMode:"single",cnSizingMode:"auto",dnSizingMode:"auto",onlineSqlPerTxn:Number($("sqlPerTxn").value)||20,
+  const defaults = {workloadMode:"single",cnSizingMode:"auto",dnSizingMode:"auto",cnCores:8,cnMemoryGb:32,dnCores:16,dnMemoryGb:64,onlineSqlPerTxn:Number($("sqlPerTxn").value)||20,
     onlineCalibrationMode:"raw",batchCalibrationMode:"raw",
+    batchWindowCheck:false,batchEfficiency:"",batchLostCn:0,batchPauseMinutes:0,batchRetryRatio:0,
     onlineCoreTps:Number($("singleCoreTps").value)||50,onlineCpuLimit:Number($("cpuLimit").value)||0.7,onlineGrowth:Number($("transactionGrowthFactor").value)||1,onlineCount:0,
     batchRateMode:"qps",batchRate:"",batchSqlPerTxn:20,batchCoreTps:"",batchCpuLimit:0.7,batchGrowth:1,batchCount:0,
     batchSizingMode:"auto",batchCores:16,batchMemoryGb:64,batchAmount:"",batchWindow:"",jointDnTps:0};
   Object.entries(defaults).forEach(([k,v])=>{if(t[k]===undefined)t[k]=v;});
-  const input=(key,label,min=1,step="any")=>`<label class="field"><span>${label}</span><input class="tenant-input" data-mode="business" data-index="${index}" data-key="${key}" type="number" min="${min}" step="${step}" value="${escapeAttr(t[key]??"")}"></label>`;
+  const input=(key,label,min=1,step="any")=>`<label class="field"><span>${label}</span><input class="tenant-input" data-mode="business" data-index="${index}" data-key="${key}" type="number" min="${min}" step="${step}" ${["cnCores","dnCores","batchCores"].includes(key)?'list="instanceCoreTiers"':""} value="${escapeAttr(t[key]??"")}"></label>`;
   const select=(key,label,options)=>`<label class="field"><span>${label}</span><select class="tenant-input" data-mode="business" data-index="${index}" data-key="${key}">${options.map(([v,l])=>`<option value="${v}" ${t[key]===v?"selected":""}>${l}</option>`).join("")}</select></label>`;
   const modeOptions=[["auto","自动推荐"],["manual","手动指定"]];
   const calibrationOptions=[["raw","待乘CPU水位"],["safe","已含安全水位"]];
@@ -3441,7 +3470,9 @@ function renderWorkloadEditor(t, index) {
       ${t.batchCalibrationMode==="safe"?"":input("batchCpuLimit","跑批CPU水位",0.01)}${input("batchGrowth","跑批年增长系数")}
       ${input("batchCount","跑批CN/生产AZ（0自动）",0,"1")}${select("batchSizingMode","跑批单CN规格",modeOptions)}
       ${t.batchSizingMode==="manual"?input("batchCores","跑批单CN物理核",1,"1")+input("batchMemoryGb","跑批单CN内存GB"):""}
-      ${input("jointDnTps","共享DN等效规划TPS（0未评估）",0)}</div>`:""}
+      ${input("jointDnTps","共享DN等效规划TPS（0未评估）",0)}</div>
+      ${t.batchRateMode==="work"?`<label class="toggle"><input type="checkbox" class="tenant-input" data-mode="business" data-index="${index}" data-key="batchWindowCheck" ${t.batchWindowCheck?"checked":""}><span>跑批窗口与故障余量校验</span></label>
+      ${t.batchWindowCheck?`<div class="grid-two">${input("batchEfficiency","并行效率（0至1，需实测）",0.001)}${input("batchLostCn","整个窗口不可用CN数",0,"1")}${input("batchPauseMinutes","窗口内总停顿分钟",0)}${input("batchRetryRatio","额外重试工作量比例",0)}</div>`:""}`:""}`:""}
     </div>`;
 }
 
@@ -4130,6 +4161,9 @@ function getSelectedReductionMeasures(reduction) {
 
 function getResourceReductionRedlines(data) {
   const redlines = getDnPlacementIssues(data);
+  getActualBatchWindowAudits(data).filter(item => item.required && (!item.withinWindow
+    || (data.environment === "production" && !item.oneHostWithinWindow)))
+    .forEach(item => redlines.push(item.text));
   data.tenantPlans.forEach(t=>(t.workloadIssues||[]).forEach(issue=>redlines.push(`${displayTenantKey(getTenantKey(t),data.tenantPlans)}：${issue}`)));
   (data.centerQuotaAudit || []).filter(site => site.missing).forEach(site => redlines.push(
     `${site.az} 主机配额不足：需求 ${site.required} 台，现有 ${site.available} 台，缺口 ${site.missing} 台；请补足目标中心资源。`
@@ -5003,9 +5037,54 @@ function renderServerRoleDetail(roles) {
   return `${visible}${hidden}`;
 }
 
+function getActualBatchWindowAudits(data) {
+  if (data.reverse) return [];
+  const servers = getPlanServers(data);
+  const azNames = getAzNames(data.mode, data.azCount);
+  const productionSites = data.mode === "local1az" ? 1 : 2;
+  return data.tenantPlans.flatMap(tenant => (tenant.cnWorkloads || [])
+    .filter(w => w.key === "batch" && w.windowAudit)
+    .flatMap(w => azNames.map((az, azIndex) => {
+      const a = w.windowAudit;
+      const seen = new Set();
+      const hostCounts = servers.filter(h => h.azIndex === azIndex).map(host => {
+        let count = 0;
+        host.roles.forEach(role => {
+          if (parseCnTenant(role) !== getTenantKey(tenant) || seen.has(role)) return;
+          const index = Number(/-CN(\d+)$/.exec(role)?.[1]) - 1;
+          const spec = tenant.cnRoleSpecs?.[index];
+          if (spec?.key !== "batch" || spec.azIndex !== azIndex) return;
+          seen.add(role);
+          // Invalid or unaudited physical hosts cannot provide verified capacity.
+          if (host.resourceAudit?.withinWatermark) count += 1;
+        });
+        return count;
+      });
+      const actual = hostCounts.reduce((sum, count) => sum + count, 0);
+      const planned = w.cnByAz[azIndex];
+      const largestHost = Math.max(0, ...hostCounts);
+      const perNode = w.cores * w.k * w.water * a.efficiency;
+      const duration = lost => {
+        const throughput = Math.max(0, actual - lost) * perNode;
+        return throughput > 0 ? a.work / throughput + a.pauseSeconds : null;
+      };
+      const seconds = duration(a.lost);
+      // Compare independent failure scenarios, avoiding double-counting the same outage.
+      const oneHostSeconds = duration(Math.max(a.lost, largestHost));
+      const withinWindow = seconds !== null && seconds <= a.windowSeconds;
+      const oneHostWithinWindow = oneHostSeconds !== null && oneHostSeconds <= a.windowSeconds;
+      const required = azIndex < productionSites;
+      const hours = value => value === null ? "无法完成" : `${round(value / 3600)}小时`;
+      const name = displayTenantKey(getTenantKey(tenant), data.tenantPlans);
+      return {tenant:getTenantKey(tenant), az, azIndex, planned, actual, largestHost, required,
+        seconds, oneHostSeconds, withinWindow, oneHostWithinWindow,
+        text:`${name} / ${az} 跑批实际落位窗口：有效 CN ${actual}/${planned}；按输入不可用 ${a.lost} CN，预计 ${hours(seconds)} / ${round(a.windowSeconds/3600)}小时，${withinWindow?"窗口算式满足":"窗口不足"}。单台物理机最多承载 ${largestHost} 个本场景 CN；按损失 max(输入不可用数, 单机CN数) 的独立故障场景，预计 ${hours(oneHostSeconds)}，${oneHostWithinWindow?"单机故障窗口算式满足":"单机故障窗口不足"}。${required?"生产容量中心":"灾备中心：仅评估全量接管，不替代容灾目标确认"}；只计已落位且水位通过的实例，线性估算非实测。`};
+    })));
+}
+
 function renderCnPlacementSummary(data) {
   const servers = getPlanServers(data);
-  return `<div class="cn-placement-summary">${getDnPrimaryDistribution(data).map(item => `<div class="dn-primary-distribution">${escapeAttr(item.text)}</div>`).join("")}${getAzNames(data.mode, data.azCount).map((az, index) => {
+  return `<div class="cn-placement-summary">${getActualBatchWindowAudits(data).map(item => `<div class="${item.withinWindow && item.oneHostWithinWindow ? "cn-placement-ok" : "cn-placement-error"}">${escapeAttr(item.text)}</div>`).join("")}${getDnPrimaryDistribution(data).map(item => `<div class="dn-primary-distribution">${escapeAttr(item.text)}</div>`).join("")}${getAzNames(data.mode, data.azCount).map((az, index) => {
     const hosts = servers.filter((server) => server.az === az && server.roles.some(isCnRole));
     const actual = hosts.reduce((sum, server) => sum + server.roles.filter(isCnRole).length, 0);
     const expected = data.tenantPlans.reduce((sum, tenant) => sum + (tenant.cnByAz?.[index] ?? tenant.cnPerAz), 0);
@@ -5589,6 +5668,7 @@ function buildExcelSheets(data) {
     `${w.count}/生产AZ；${w.cores}物理核/${w.memoryGb}GB`,w.reason
   ])));
   getDnPrimaryDistribution(data).forEach(item => summaryRows.push(["中心内主分布", `${displayTenantKey(item.tenant, data.tenantPlans)} / ${item.az}`, item.text]));
+  getActualBatchWindowAudits(data).forEach(item => summaryRows.push(["跑批实际落位窗口", item.az, item.text]));
   (data.centerQuotaAudit || []).forEach(site => summaryRows.push(["中心主机配额", site.az,
     `需求 ${site.required} / 现有 ${site.available} / 已分配 ${site.assigned} / 缺口 ${site.missing} 台`]));
   const summarySheet = buildExcelTableSheet({
@@ -6218,7 +6298,7 @@ function bindParameterEvents() {
     if (event.target.matches(".tenant-input")) {
       const update = updateTenantSpec(event.target);
       if (!update) return;
-      if (["type", "deploymentStrategy", "workloadMode", "cnSizingMode", "dnSizingMode", "batchSizingMode", "batchRateMode", "onlineCalibrationMode", "batchCalibrationMode"].includes(update.key)) {
+      if (["type", "deploymentStrategy", "workloadMode", "cnSizingMode", "dnSizingMode", "batchSizingMode", "batchRateMode", "onlineCalibrationMode", "batchCalibrationMode", "batchWindowCheck"].includes(update.key)) {
         render();
         return;
       }
@@ -6295,7 +6375,7 @@ function updateTenantSpec(input) {
   if (!target) return;
   const key = input.dataset.key;
   const numericKeys = new Set(["qps", "dataTb", "minShards", "replicaCount", "cnPerAz", "shardCount", "cnCores", "cnMemoryGb", "dnCores", "dnMemoryGb"]);
-  target[key] = numericKeys.has(key) && input.value.trim() !== "" ? Number(input.value) : input.value;
+  target[key] = input.type === "checkbox" ? input.checked : numericKeys.has(key) && input.value.trim() !== "" ? Number(input.value) : input.value;
   if (mode === "business" && key === "minShards") {
     target.minShardsManual = true;
   }

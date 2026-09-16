@@ -100,7 +100,38 @@ try{
    businessTenantSpecs[0][key+'CalibrationMode']='unknown';render();return {name:'invalid-calibration-'+key,pass:!latestDesignData&&$('downloadExcelBtn').disabled};
   },key));
  }
+ await setup();results.push(await page.evaluate(()=>{
+  const t=businessTenantSpecs[0];Object.assign(t,{batchWindowCheck:true,batchCalibrationMode:'safe',batchEfficiency:.8,batchLostCn:1,batchPauseMinutes:10,batchRetryRatio:.1});render();
+  const b=latestDesignData.tenantPlans[0].cnWorkloads[1],a=b.windowAudit;
+  return {name:'batch-window-independent-arithmetic',pass:b.count===4&&a.work===39600000&&a.throughput===3840
+   &&a.seconds===10912.5&&a.requiredCount===6&&!a.withinWindow
+   &&getResourceReductionRedlines(latestDesignData).some(x=>x.includes('窗口不足'))};
+ }));
+ for(const [key,value] of [['batchEfficiency',''],['batchEfficiency',0],['batchEfficiency',1.1],['batchLostCn',1.5],['batchPauseMinutes',-1],['batchRetryRatio',-1]]){
+  await setup();results.push(await page.evaluate(({key,value})=>{
+   Object.assign(businessTenantSpecs[0],{batchWindowCheck:true,batchEfficiency:.8,[key]:value});render();
+   return {name:'window-invalid-'+key+'-'+value,pass:!latestDesignData&&$('downloadExcelBtn').disabled};
+  },{key,value}));
+ }
+ for(const [key,value] of [['batchLostCn',5],['batchPauseMinutes',120]]){
+  await setup();results.push(await page.evaluate(({key,value})=>{
+   Object.assign(businessTenantSpecs[0],{batchWindowCheck:true,batchEfficiency:1,[key]:value});render();
+   const b=latestDesignData.tenantPlans[0].cnWorkloads[1];return {name:'window-unavailable-'+key,pass:!b.windowAudit.withinWindow&&b.count===5};
+  },{key,value}));
+ }
+ await setup();results.push(await page.evaluate(()=>{
+  Object.assign(businessTenantSpecs[0],{batchWindowCheck:true,batchEfficiency:1});render();const a=latestDesignData.tenantPlans[0].cnWorkloads[1].windowAudit;
+  return {name:'window-satisfied-not-production-certification',pass:a.withinWindow&&a.seconds<=7200
+   &&getResourceReductionRedlines(latestDesignData).some(x=>x.includes('混合性能未评估'))};
+ }));
+ await setup();await page.locator('[data-key="batchWindowCheck"]').check();
+ results.push(await page.evaluate(()=>({name:'window-efficiency-required-ui',pass:!latestDesignData})));
+ await page.locator('[data-key="batchEfficiency"]').fill('0.8');
+ results.push(await page.evaluate(()=>({name:'window-efficiency-recovery-ui',pass:!!latestDesignData?.tenantPlans[0].cnWorkloads[1].windowAudit})));
+ await page.locator('[data-key="batchWindowCheck"]').uncheck();
+ results.push(await page.evaluate(()=>({name:'window-disabled-retains-draft',pass:!latestDesignData.tenantPlans[0].cnWorkloads[1].windowAudit&&Number(businessTenantSpecs[0].batchEfficiency)===.8})));
  await setup();await page.locator('[data-key="batchCalibrationMode"]').selectOption('safe');
+ await page.locator('[data-key="batchWindowCheck"]').check();await page.locator('[data-key="batchEfficiency"]').fill('0.8');
  fs.writeFileSync(path.join(out,'sheets.json'),JSON.stringify(await page.evaluate(()=>buildExcelSheets(latestDesignData))));
  for(const [id,name] of [['downloadExcelBtn','workloads.xlsx'],['downloadTopologyBtn','network.png'],['downloadServerTopologyBtn','servers.png']]){
   const wait=page.waitForEvent('download');await page.locator('#'+id).click();const d=await wait;await d.saveAs(path.join(out,name));results.push({name,pass:fs.statSync(path.join(out,name)).size>1000});
