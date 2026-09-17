@@ -2098,9 +2098,9 @@ a {
 .ppt-role-pill.cn,
 .ppt-role-pill.dn,
 .ppt-dn-group-token { flex-direction: column; align-items: flex-start; max-width: 100%; }
-.cn-placement-summary { display: grid; gap: 8px; margin: 12px 0; font-size: 14px; overflow-wrap: anywhere; }
-.cn-placement-summary > div { padding: 8px; border-left: 3px solid var(--teal); }
-.cn-placement-summary .cn-placement-error { border-color: #ff6470; color: #ff8891; background: #32181c; }
+.cn-placement-summary, .dn-failure-summary { display: grid; gap: 8px; margin: 12px 0; font-size: 14px; overflow-wrap: anywhere; }
+.cn-placement-summary > div, .dn-failure-summary > div { padding: 8px; border-left: 3px solid var(--teal); }
+.cn-placement-summary .cn-placement-error, .dn-failure-summary .cn-placement-error { border-color: #ff6470; color: #ff8891; background: #32181c; }
 .physical-server.placement-error { border-color: #ff6470; }
 .cn-plan-overview .topology-ribbon { position: static; padding: 12px 14px 0; }
 .cn-placement-summary + .ppt-network-board { padding-top: 14px; }

@@ -1,0 +1,51 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {chromium} from '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs';
+const out=path.resolve(process.env.REMEDIATION_TEST_OUTPUT||'outputs/goldendb-spec-remediation-20260917/s01b3b2b1');fs.mkdirSync(out,{recursive:true});
+const browser=await chromium.launch({channel:'chrome',headless:true}),page=await browser.newPage();
+const results=[],errors=[];page.on('pageerror',e=>errors.push(e.message));
+try{
+ await page.goto('file://'+path.resolve('goldendb-architecture-designer/index.html'));
+ results.push(...await page.evaluate(()=>{
+  const base=structuredClone(latestDesignData),d=structuredClone(base),checks=[];
+  const check=(name,pass)=>checks.push({name,pass});
+  const a={...d.tenantPlans[0],shardCount:1,replicasPerShard:1,dnCores:8,dnMemoryGb:32,cnCores:8,cnMemoryGb:32,futureDataTb:1,plannedTxnTps:1500};
+  delete a.cnRoleSpecs;
+  const b={...a,tenantId:createTenantIdentity(),name:'second',plannedTxnTps:2500};
+  d.tenantPlans=[a,b];Object.assign(d,{dnReferenceTps:2000,dnReferenceCores:16,dnReferenceMemoryGb:64,maxShardTb:2});
+  const ka=getTenantKey(a),kb=getTenantKey(b);
+  const host={...d.serverSizing.serverPlan[0],id:'pressure-host',az:'中心A',azIndex:0,roles:[`${ka}-DN-G1-Master`,`${kb}-DN-G1-Master`,`${ka}-CN1`,`${ka}-GTM1`,'管理节点'],spec:{...d.serverSizing.serverPlan[0].spec,cores:64,memoryGb:256,diskTb:10}};
+  host.resourceAudit=getServerResourceAudit(host,{tenantPlans:d.tenantPlans,reserveRatio:.35});
+  d.serverSizing.serverPlan=[host];const before=JSON.stringify(d);
+  let r=getDnHostPressure(d)[0];
+  check('cross-tenant-cpu-sum',r.details.map(x=>x.requiredCpu).join(',')==='12,20'&&r.groupCount===2);
+  check('retains-other-component-reservations',r.usedCpu===32&&r.pressureCpu===48&&r.usableCpu===41.6&&r.error);
+  check('bounded-hypothesis-label',r.text.includes('保守压力假设')&&r.text.includes('不借其他实例余量'));
+  check('excel-linked',JSON.stringify(buildExcelSheets(d)).includes(r.text));
+  check('read-only',JSON.stringify(d)===before);
+  a.plannedTxnTps=500;b.plannedTxnTps=500;r=getDnHostPressure(d)[0];
+  check('low-load-keeps-allocated-cores',r.pressureCpu===32&&!r.error);
+  a.plannedTxnTps=1500;b.plannedTxnTps=2500;
+  host.resourceAudit.usable.cpu=100;r=getDnHostPressure(d)[0];
+  check('host-spare-not-instance-capacity',!r.error&&getDnTakeoverCapacity(d).every(x=>x.performanceEnough===false));
+  host.roles.push(`${ka}-DN-G1-Master`);r=getDnHostPressure(d)[0];
+  check('duplicate-unknown',!r.evaluated&&r.pressureCpu===null);host.roles.pop();
+  host.roles.push(`${ka}-DN-G1-Slave99`);check('unexpected-role-unknown',!getDnHostPressure(d)[0].evaluated);host.roles.pop();
+  a.replicasPerShard=2;host.roles.push(`${ka}-DN-G1-Slave1`);
+  check('same-group-not-counted-as-independent',!getDnHostPressure(d)[0].evaluated);host.roles.pop();a.replicasPerShard=1;
+  a.dnMemoryGb=16;check('unknown-calibration-no-guess',!getDnHostPressure(d)[0].evaluated);a.dnMemoryGb=32;
+  const saved=host.resourceAudit;delete host.resourceAudit;check('missing-host-audit',!getDnHostPressure(d)[0].evaluated);host.resourceAudit=saved;
+  saved.withinWatermark=false;check('unsafe-host-always-error',getDnHostPressure(d)[0].error);saved.withinWatermark=true;
+  const reverse={...d,reverse:true,serverPlan:[host]};check('reverse-unknown-throughput',!getDnHostPressure(reverse)[0].evaluated);
+  d.serverSizing.serverPlan=[];check('no-host-no-invented-pressure',getDnHostPressure(d).length===0);
+  return checks;
+ }));
+ fs.writeFileSync(path.join(out,'sheets.json'),JSON.stringify(await page.evaluate(()=>buildExcelSheets(latestDesignData))));
+ const wait=page.waitForEvent('download');await page.locator('#downloadExcelBtn').click();await(await wait).saveAs(path.join(out,'workloads.xlsx'));
+ for(const width of [390,875,1600]){await page.setViewportSize({width,height:1000});await page.locator('.dn-failure-summary').scrollIntoViewIfNeeded();
+  results.push({name:'layout-'+width,pass:await page.locator('.dn-failure-summary').evaluate(e=>e.scrollWidth<=e.clientWidth+1)});
+  await page.screenshot({path:path.join(out,`pressure-${width}.png`)});
+ }
+ results.push({name:'browser-errors',pass:errors.length===0,errors});
+}finally{await browser.close();fs.writeFileSync(path.join(out,'results.json'),JSON.stringify(results,null,2));}
+console.log(results.filter(x=>!x.pass));console.log(`${results.filter(x=>x.pass).length}/${results.length}`);if(results.some(x=>!x.pass))process.exitCode=1;

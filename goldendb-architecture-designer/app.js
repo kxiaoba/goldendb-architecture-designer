@@ -1217,6 +1217,120 @@ function getDnPlacementIssues(data) {
   return issues;
 }
 
+function getDnFailureCoverage(data) {
+  const servers = getPlanServers(data);
+  const azNames = getAzNames(data.mode, data.azCount);
+  return data.tenantPlans.flatMap(tenant => {
+    const key = getTenantKey(tenant);
+    const roles = new Map();
+    servers.forEach((host, hostIndex) => host.roles.forEach(role => {
+      const parsed = parseDnPlacementRole(role);
+      if (parsed?.tenant !== key) return;
+      if (!roles.has(role)) roles.set(role, []);
+      roles.get(role).push({host,hostIndex});
+    }));
+    // Only uniquely placed, expected replicas on resource-valid hosts are evidence.
+    const groups = Array.from({length:tenant.shardCount}, (_,i) => {
+      const copies = [];
+      for (let replica=1; replica<=tenant.replicasPerShard; replica++) {
+        const role = `${key}-DN-G${i+1}-${replica===1?"Master":`Slave${replica-1}`}`;
+        const placed = roles.get(role) || [];
+        if (placed.length===1 && placed[0].host.resourceAudit?.withinWatermark) copies.push(placed[0]);
+      }
+      return {group:i+1,copies};
+    });
+    const describe = ids => ids.length ? `${ids.slice(0,12).map(n=>`G${n}`).join("、")}${ids.length>12?`等${ids.length}个Group`:""}` : "无";
+    const name = displayTenantKey(key,data.tenantPlans);
+    const scope = "只检查预期副本唯一落位及服务器水位；存活不等于可提升为主，gSync配置、复制追平、仲裁、接管性能和RPO/RTO未验证，不累加从副本TPS。";
+    const normalMissing = groups.filter(g=>!g.copies.length).map(g=>g.group);
+    const rows = [{tenant:key,scenario:"normal",missing:normalMissing,error:normalMissing.length>0,
+      text:`${name} DN 正常副本覆盖：无有效副本Group ${describe(normalMissing)}。${scope}`}];
+    const hostFailures = [];
+    const usedHosts = new Set(groups.flatMap(g=>g.copies.map(c=>c.hostIndex)));
+    usedHosts.forEach(hostIndex=>{
+      const missing = groups.filter(g=>!g.copies.some(c=>c.hostIndex!==hostIndex)).map(g=>g.group);
+      if(missing.length) hostFailures.push({host:servers[hostIndex].id,missing});
+    });
+    const hostMissing = [...new Set([...normalMissing,...hostFailures.flatMap(h=>h.missing)])].sort((a,b)=>a-b);
+    rows.push({tenant:key,scenario:"host",missing:hostMissing,hostFailures,error:data.environment==="production"&&hostMissing.length>0,
+      text:`${name} DN 单机故障副本覆盖：逐一模拟 ${usedHosts.size} 台有效DN宿主机失效，至少一种单机故障下无有效副本Group ${describe(hostMissing)}；${hostFailures.length} 个宿主机失效场景存在缺口。${data.environment==="production"?"生产必要条件检查":"POC故障余量仅提示"}。${scope}`});
+    azNames.forEach((az,azIndex)=>{
+      const missing = groups.filter(g=>!g.copies.some(c=>c.host.azIndex!==azIndex)).map(g=>g.group);
+      // A local-only topology does not promise survival of its only data center.
+      const required = data.environment==="production" && data.azCount>1 && !isDisasterSite(data.mode,azIndex);
+      rows.push({tenant:key,scenario:"az",az,missing,error:required&&missing.length>0,
+        text:`${name} DN ${az} 整中心故障副本覆盖：其余中心无有效副本Group ${describe(missing)}。${required?"生产中心容灾必要条件检查":"单中心/POC/灾备故障参考"}。${scope}`});
+    });
+    return rows;
+  });
+}
+
+function getDnTakeoverCapacity(data) {
+  const coverage = getDnFailureCoverage(data);
+  return data.tenantPlans.map(tenant => {
+    const key = getTenantKey(tenant), name = displayTenantKey(key,data.tenantPlans);
+    const scope = "按每Group单个提升后的主副本承载，不累加主从副本TPS；热点、多租户宿主机叠加、IOPS/网络、DN/GTM混合瓶颈及同步仲裁未验证，不代表可以切换或满足RPO/RTO。";
+    const evidence = [tenant.plannedTxnTps,tenant.shardCount,tenant.dnCores,tenant.dnMemoryGb,
+      data.dnReferenceCores,data.dnReferenceMemoryGb,data.dnReferenceTps,data.maxShardTb,tenant.futureDataTb];
+    if (data.reverse || !evidence.every(v=>Number.isFinite(v)&&v>0)) {
+      return {tenant:key,evaluated:false,error:false,status:"未评估",
+        text:`${name} DN 单副本接管容量：未评估，缺少业务TPS、容量或匹配标定，不能由服务器数量反推业务吞吐。${scope}`};
+    }
+    const ratio = Math.min(1,tenant.dnCores/data.dnReferenceCores);
+    const requiredMemory = data.dnReferenceMemoryGb*ratio;
+    const target = tenant.plannedTxnTps/tenant.shardCount;
+    const dataTb = tenant.futureDataTb/tenant.shardCount;
+    const storageEnough = dataTb<=data.maxShardTb;
+    const memoryEnough = tenant.dnMemoryGb>=requiredMemory;
+    // Effective reference TPS already includes the configured calibration watermark.
+    const perReplicaTps = memoryEnough ? data.dnReferenceTps*ratio : null;
+    const performanceEnough = perReplicaTps===null ? null : perReplicaTps>=target;
+    const physicalGaps = coverage.filter(row=>row.tenant===key&&row.error).length;
+    const error = !storageEnough || performanceEnough===false || physicalGaps>0;
+    const status = error ? "必要条件不足" : !memoryEnough ? "性能未评估" : "容量算式满足，接管未验证";
+    return {tenant:key,evaluated:memoryEnough,error,status,target,dataTb,requiredMemory,perReplicaTps,
+      performanceEnough,storageEnough,physicalGaps,
+      text:`${name} DN 单副本接管容量：${status}。完整规划 ${round(tenant.plannedTxnTps)}TPS / ${tenant.shardCount} Group = ${round(target)}TPS/Group（均匀负载假设）；单DN ${tenant.dnCores}C/${tenant.dnMemoryGb}GB，${memoryEnough?`有效标定 ${data.dnReferenceTps}TPS × min(1, ${tenant.dnCores}/${data.dnReferenceCores}) = ${round(perReplicaTps)}TPS，不再次扣减水位、不向上外推`:`内存低于按标定比例需要的 ${round(requiredMemory)}GB，性能不推算`}；数据 ${round(dataTb)}/${data.maxShardTb}TB/Group（${storageEnough?"容量水位算式满足":"超过容量水位"}）；物理副本覆盖错误场景 ${physicalGaps} 项。${scope}`};
+  });
+}
+
+function getDnHostPressure(data) {
+  const servers = getPlanServers(data);
+  const capacities = new Map(getDnTakeoverCapacity(data).map(item=>[item.tenant,item]));
+  const tenants = new Map(data.tenantPlans.map(t=>[getTenantKey(t),t]));
+  const roleCounts = new Map();
+  servers.forEach(h=>h.roles.filter(isDnRole).forEach(r=>roleCounts.set(r,(roleCounts.get(r)||0)+1)));
+  return servers.filter(h=>h.roles.some(isDnRole)).map(host=>{
+    const audit = host.resourceAudit;
+    let extraCpu = 0, groupCount = 0;
+    const reasons = new Set(), groups = new Set(), details = [];
+    if (!audit) reasons.add("缺少服务器资源审计");
+    host.roles.filter(isDnRole).forEach(role=>{
+      const parsed = parseDnPlacementRole(role), tenant = tenants.get(parsed?.tenant), capacity = capacities.get(parsed?.tenant);
+      if (!parsed || !tenant || parsed.group<1 || parsed.group>tenant.shardCount
+        || (parsed.role!=="M" && (!/^S[1-9]\d*$/.test(parsed.role) || Number(parsed.role.slice(1))>=tenant.replicasPerShard))) {
+        reasons.add("存在非预期DN角色");return;
+      }
+      const groupKey = `${parsed.tenant}/G${parsed.group}`;
+      if (roleCounts.get(role)!==1 || groups.has(groupKey)) {reasons.add("重复角色或同Group副本同机");return;}
+      groups.add(groupKey);
+      if (!capacity?.evaluated || !(capacity.perReplicaTps>0)) {reasons.add("部分租户缺少可用吞吐标定");return;}
+      const requiredCpu = Math.ceil(capacity.target / capacity.perReplicaTps * tenant.dnCores);
+      extraCpu += Math.max(0,requiredCpu-tenant.dnCores);
+      groupCount++;
+      details.push({tenant:parsed.tenant,group:parsed.group,allocatedCpu:tenant.dnCores,requiredCpu});
+    });
+    const evaluated = reasons.size===0;
+    const pressureCpu = evaluated ? audit.used.cpu+extraCpu : null;
+    const exceeds = evaluated && pressureCpu>audit.usable.cpu;
+    const error = Boolean(audit&&!audit.withinWatermark) || exceeds;
+    const status = !evaluated ? "压力未评估" : exceeds ? "压力假设超过CPU水位" : error ? "现有配置超过资源水位" : "压力算式未超水位，性能未验证";
+    return {host:host.id,az:host.az,evaluated,error,status,pressureCpu,groupCount,details,
+      usedCpu:audit?.used.cpu,usableCpu:audit?.usable.cpu,
+      text:`${host.id} / ${host.az} DN宿主机接管压力上界：${status}。${evaluated?`配置额度 ${round(audit.used.cpu)}核（含CN/GTM/管理等） + 本机 ${groupCount} 个Group单副本完整目标所需额外 ${round(extraCpu)}核 = ${round(pressureCpu)}/${round(audit.usable.cpu)} 可用核；原配置CPU/内存/磁盘水位${audit.withinWatermark?"算式满足":"不满足"}`:[...reasons].join("；")}。各租户分别按其事务口径换算CPU后累加，不叠加副本TPS；不借其他实例余量替代单副本校验。本机各不同Group同时承担完整负载仅为保守压力假设，不是已验证选主结果；热点、IOPS/网络、回放开销及共享DN/GTM实测性能仍未评估。`};
+  });
+}
+
 function buildBusinessSiteDemands(config) {
   const sites = Array.from({ length: config.azCount }, (_, azIndex) => ({
     azIndex,
@@ -3316,7 +3430,8 @@ function render(options = {}) {
     $("businessServerBlock").classList.remove("hidden");
   }
   renderTopology(data);
-  $("placementDetails").innerHTML = renderCnPlacementSummary(data);
+  $("placementDetails").innerHTML = renderCnPlacementSummary(data)
+    + `<div class="dn-failure-summary">${[...getDnFailureCoverage(data),...getDnTakeoverCapacity(data),...getDnHostPressure(data)].map(item=>`<div class="${item.error?"cn-placement-error":""}">${escapeAttr(item.text)}</div>`).join("")}</div>`;
   renderExcelExportSummary(data);
   renderRelationGraph(data);
 }
@@ -3847,6 +3962,10 @@ function renderRisks(data) {
   }
   getActualCnCapacityAudits(data).filter(item => !item.withinCapacity || !item.oneHostWithinCapacity)
     .forEach(item => risks.push([item.error ? "risk-high" : "risk-mid", item.text]));
+  getDnFailureCoverage(data).filter(item => item.missing.length)
+    .forEach(item => risks.push([item.error ? "risk-high" : "risk-mid",item.text]));
+  getDnTakeoverCapacity(data).forEach(item=>risks.push([item.error?"risk-high":"risk-mid",item.text]));
+  getDnHostPressure(data).filter(item=>item.error||!item.evaluated).forEach(item=>risks.push([item.error?"risk-high":"risk-mid",item.text]));
   data.tenantPlans.forEach((tenant) => {
     if (tenant.cnBelowMinimum && !tenant.cnWorkloads) {
       risks.push(["risk-high", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 每生产 AZ ${tenant.cnPerAz} 个 CN，最终规格安全能力 ${round(tenant.cnSafeTpsPerAz)} TPS，目标 ${round(tenant.cnTargetTps)} TPS；未满足性能目标或当前至少 2 个 CN 的冗余规则，请增加节点或调整标定规格。`]);
@@ -4206,6 +4325,9 @@ function getSelectedReductionMeasures(reduction) {
 
 function getResourceReductionRedlines(data) {
   const redlines = getDnPlacementIssues(data);
+  getDnFailureCoverage(data).filter(item=>item.error).forEach(item=>redlines.push(item.text));
+  getDnTakeoverCapacity(data).filter(item=>item.error).forEach(item=>redlines.push(item.text));
+  getDnHostPressure(data).filter(item=>item.error).forEach(item=>redlines.push(item.text));
   if (!data.reverse && data.dnCalibration?.requiresEvidence && !data.dnCalibration.source) {
     redlines.push("DN 自定义标定来源未填写：请补充机型、版本、SQL模型及压测记录；当前仅为工程估算，不能承诺生产性能。");
   }
@@ -5760,6 +5882,9 @@ function buildExcelSheets(data) {
   getDnPrimaryDistribution(data).forEach(item => summaryRows.push(["中心内主分布", `${displayTenantKey(item.tenant, data.tenantPlans)} / ${item.az}`, item.text]));
   getActualBatchWindowAudits(data).forEach(item => summaryRows.push(["跑批实际落位窗口", item.az, item.text]));
   getActualCnCapacityAudits(data).forEach(item => summaryRows.push(["CN实际容量与单机故障", item.az, item.text]));
+  getDnFailureCoverage(data).forEach(item => summaryRows.push(["DN故障副本覆盖", item.az || item.scenario, item.text]));
+  getDnTakeoverCapacity(data).forEach(item => summaryRows.push(["DN单副本接管容量", item.status, item.text]));
+  getDnHostPressure(data).forEach(item => summaryRows.push(["DN宿主机接管压力上界", item.host, item.text]));
   (data.centerQuotaAudit || []).forEach(site => summaryRows.push(["中心主机配额", site.az,
     `需求 ${site.required} / 现有 ${site.available} / 已分配 ${site.assigned} / 缺口 ${site.missing} 台`]));
   const summarySheet = buildExcelTableSheet({
