@@ -2505,3 +2505,4 @@ a {
 }
 
 .planning-input-status[hidden] { display: none; }
+.dn-planning-fields > .field[hidden] { display: none; }

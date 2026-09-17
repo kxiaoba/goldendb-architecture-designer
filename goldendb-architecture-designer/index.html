@@ -137,9 +137,15 @@
               <section class="dn-planning-group">
                 <div class="dn-planning-group-title">
                   <strong>规划输入</strong>
-                  <span>容量水位独立参与容量分片；核数、内存和 TPS 必须来自同一标定规格。</span>
+                  <span>容量水位独立参与容量分片；核数、内存、性能与事务模型须来自同一标定。</span>
                 </div>
                 <div class="grid-two dn-planning-fields">
+                  <label class="field"><span>DN 性能标定单位</span><select id="dnCalibrationUnit"><option value="instanceTps">整实例 TPS</option><option value="coreQps">单核 QPS（需匹配事务模型）</option></select></label>
+                  <label class="field"><span>DN 标定水位口径</span><select id="dnCalibrationWaterMode"><option value="safe">已含安全水位</option><option value="raw">需乘 CPU 水位</option></select></label>
+                  <label class="field" hidden><span>DN 单核 QPS 标定</span><input id="dnCoreQps" type="number" min="0.01" step="any" value="1000" disabled></label>
+                  <label class="field" hidden><span>标定每事务 SQL 数（非业务默认值）</span><input id="dnCalibrationSqlPerTxn" type="number" min="1" step="any" value="" disabled></label>
+                  <label class="field" hidden><span>DN 标定 CPU 水位</span><input id="dnCalibrationCpuLimit" type="number" min="0.01" max="1" step="0.01" value="0.7" disabled></label>
+                  <label class="field"><span>DN 标定来源 / 压测记录</span><input id="dnCalibrationSource" type="text" value="" maxlength="1000" placeholder="机型、版本、SQL模型、压测记录"></label>
                   <label class="field">
                     <span>单主 DN 容量水位 TB</span>
                     <input id="maxShardTb" type="number" min="0.1" step="0.1" value="2">
@@ -157,7 +163,7 @@
                     <input id="dnReferenceTps" type="number" min="1" value="2000">
                   </label>
                 </div>
-                <p class="dn-planning-note">默认标定点：官方指南典型容器规格 16C / 64GB / 单库 2000TPS。客户机型应替换为同机型 POC 标定结果。</p>
+                <p class="dn-planning-note">整实例 TPS 默认参考：16C / 64GB / 2000TPS。单核 1000QPS 为待验证项目输入，不是产品上限；须补齐匹配事务模型与来源。客户机型须使用同机型 POC 标定。</p>
               </section>
 
               <section class="dn-planning-group dn-planning-result">
@@ -175,7 +181,7 @@
                     <input id="safeShardTps" type="number" min="1" value="2000" readonly>
                   </label>
                 </div>
-                <p class="dn-planning-note formula">单核 TPS = 标定 TPS ÷ 标定物理核数；单主 DN 性能上限 = 标定 TPS。该工程折算用于分片与规格初算，不是厂商性能承诺。</p>
+                <p id="dnCalibrationDescription" class="dn-planning-note formula">有效单核 TPS = 有效整实例 TPS ÷ 标定物理核数；工程折算不是单核实测或产品上限。</p>
               </section>
             </div>
 
