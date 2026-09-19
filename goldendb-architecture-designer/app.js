@@ -313,6 +313,12 @@ function getPlanningInputIssues(module = $("designModule").value) {
   specs.forEach((tenant, index) => {
     const textError = xmlTextError(tenant.name, `租户 ${index + 1} 名称`);
     if (textError) issues.push(textError);
+    if (module === "business") {
+      const error = numericInputError(tenant.dnHotspotFactor ?? 1, `租户 ${index + 1} DN 热点压力倍数`, {min:1});
+      if (error) issues.push(error);
+      const dataError = numericInputError(tenant.dnDataSkewFactor ?? 1, `租户 ${index + 1} DN 数据倾斜倍数`, {min:1});
+      if (dataError) issues.push(dataError);
+    }
     const rules = module === "reverse"
       ? { cnPerAz: [1, true], cnCores: [1, true], cnMemoryGb: [1, true], dnCores: [1, true], dnMemoryGb: [1, true] }
       : { qps: [1, true], dataTb: [0.1, false] };
@@ -1278,9 +1284,20 @@ function getDnTakeoverCapacity(data) {
     }
     const ratio = Math.min(1,tenant.dnCores/data.dnReferenceCores);
     const requiredMemory = data.dnReferenceMemoryGb*ratio;
-    const target = tenant.plannedTxnTps/tenant.shardCount;
-    const dataTb = tenant.futureDataTb/tenant.shardCount;
+    const hotspotFactor = workloadNumber(tenant.dnHotspotFactor ?? 1, "DN 热点压力倍数", 1);
+    const effectiveHotspotFactor = Math.min(hotspotFactor, tenant.shardCount);
+    const target = tenant.plannedTxnTps/tenant.shardCount * effectiveHotspotFactor;
+    const dataSkewFactor = workloadNumber(tenant.dnDataSkewFactor ?? 1, "DN 数据倾斜倍数", 1);
+    const effectiveDataSkewFactor = Math.min(dataSkewFactor, tenant.shardCount);
+    const averageDataTb = tenant.futureDataTb/tenant.shardCount;
+    const hasGroupData = Array.isArray(tenant.dnGroupDataTb);
+    const dataTb = hasGroupData ? Math.max(...tenant.dnGroupDataTb)
+      : Math.min(tenant.futureDataTb, averageDataTb * effectiveDataSkewFactor);
     const storageEnough = dataTb<=data.maxShardTb;
+    const capacityLabel = storageEnough ? "容量水位算式满足" : "超过容量水位";
+    const dataDescription = hasGroupData
+      ? `逐Group规划数据 ${tenant.dnGroupDataTb.map((value,i)=>`G${i+1}=${round(value)}TB`).join("、")}；最大分片 ${round(dataTb)}/${data.maxShardTb}TB（${capacityLabel}）；各副本按对应Group容量计入服务器磁盘，忽略数据倾斜倍数。客户录入量非实测认证，RAID/日志/临时空间仍待复核`
+      : `规划数据 ${round(tenant.futureDataTb)}TB / ${tenant.shardCount} Group = 平均 ${round(averageDataTb)}TB，× min(数据倾斜倍数 ${dataSkewFactor}, Group数 ${tenant.shardCount}) = 最大分片 ${round(dataTb)}/${data.maxShardTb}TB（${dataSkewFactor===1?"均匀容量假设":"客户数据倾斜假设，非实测"}，${capacityLabel}）；仅校验单分片，整机磁盘仍按原均匀模型，实际逐Group磁盘分布未验证`;
     const memoryEnough = tenant.dnMemoryGb>=requiredMemory;
     // Effective reference TPS already includes the configured calibration watermark.
     const perReplicaTps = memoryEnough ? data.dnReferenceTps*ratio : null;
@@ -1288,9 +1305,9 @@ function getDnTakeoverCapacity(data) {
     const physicalGaps = coverage.filter(row=>row.tenant===key&&row.error).length;
     const error = !storageEnough || performanceEnough===false || physicalGaps>0;
     const status = error ? "必要条件不足" : !memoryEnough ? "性能未评估" : "容量算式满足，接管未验证";
-    return {tenant:key,evaluated:memoryEnough,error,status,target,dataTb,requiredMemory,perReplicaTps,
-      performanceEnough,storageEnough,physicalGaps,
-      text:`${name} DN 单副本接管容量：${status}。完整规划 ${round(tenant.plannedTxnTps)}TPS / ${tenant.shardCount} Group = ${round(target)}TPS/Group（均匀负载假设）；单DN ${tenant.dnCores}C/${tenant.dnMemoryGb}GB，${memoryEnough?`有效标定 ${data.dnReferenceTps}TPS × min(1, ${tenant.dnCores}/${data.dnReferenceCores}) = ${round(perReplicaTps)}TPS，不再次扣减水位、不向上外推`:`内存低于按标定比例需要的 ${round(requiredMemory)}GB，性能不推算`}；数据 ${round(dataTb)}/${data.maxShardTb}TB/Group（${storageEnough?"容量水位算式满足":"超过容量水位"}）；物理副本覆盖错误场景 ${physicalGaps} 项。${scope}`};
+    return {tenant:key,evaluated:memoryEnough,error,status,target,dataTb,requiredMemory,perReplicaTps,hotspotFactor,effectiveHotspotFactor,
+      performanceEnough,storageEnough,physicalGaps,averageDataTb,dataSkewFactor,effectiveDataSkewFactor,
+      text:`${name} DN 单副本接管容量：${status}。完整规划 ${round(tenant.plannedTxnTps)}TPS / ${tenant.shardCount} Group × min(热点倍数 ${hotspotFactor}, Group数 ${tenant.shardCount}) = 最热Group ${round(target)}TPS（${hotspotFactor===1?"均匀负载假设":"客户热点压力假设，非实测"}，不超过租户总TPS；仅用于校验，不自动扩容）；单DN ${tenant.dnCores}C/${tenant.dnMemoryGb}GB，${memoryEnough?`有效标定 ${data.dnReferenceTps}TPS × min(1, ${tenant.dnCores}/${data.dnReferenceCores}) = ${round(perReplicaTps)}TPS，不再次扣减水位、不向上外推`:`内存低于按标定比例需要的 ${round(requiredMemory)}GB，性能不推算`}；${dataDescription}；物理副本覆盖错误场景 ${physicalGaps} 项。${scope}`};
   });
 }
 
@@ -1356,7 +1373,7 @@ function buildBusinessSiteDemands(config) {
         demand.instances += 1;
         demand.cpuCores += tenant.dnCores;
         demand.memoryGb += tenant.dnMemoryGb;
-        demand.diskTb += tenant.futureDataTb / Math.max(1, tenant.shardCount);
+        demand.diskTb += getDnGroupDataTb(tenant, group);
       }
     }
   });
@@ -2127,6 +2144,29 @@ function getServerCnTenants(server) {
   return [...new Set(server.roles.map(parseCnTenant).filter(Boolean))];
 }
 
+function parseDnGroupData(raw, tenant) {
+  if (raw == null || String(raw).trim() === "") return null;
+  let values;
+  try { values = JSON.parse(raw); } catch {
+    throw new PlanningInputError("逐Group数据必须是JSON数字数组，例如 [1, 0.5, 0.5]。");
+  }
+  if (!Array.isArray(values) || values.length !== tenant.shardCount
+    || !values.every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+    throw new PlanningInputError(`逐Group数据必须包含 ${tenant.shardCount} 个非负有限数字，按G1至G${tenant.shardCount}顺序。`);
+  }
+  const total = values.reduce((sum,value)=>sum+value,0);
+  if (!Number.isFinite(total) || Math.abs(total-tenant.dataTb)>Math.max(1e-9,tenant.dataTb*1e-9)) {
+    throw new PlanningInputError(`逐Group当前数据合计必须等于租户当前数据量 ${tenant.dataTb}TB，不能填写副本总容量或增长后容量。`);
+  }
+  const planned = values.map(value => value * (tenant.futureDataTb/tenant.dataTb));
+  if (!planned.every(Number.isFinite)) throw new PlanningInputError("逐Group增长后容量超出数值范围。");
+  return planned;
+}
+
+function getDnGroupDataTb(tenant, group) {
+  return tenant.dnGroupDataTb?.[group-1] ?? tenant.futureDataTb / Math.max(1,tenant.shardCount);
+}
+
 function getRoleResourceDemand(role, tenantPlans) {
   const cnTenant = parseCnTenant(role);
   const dnRole = parseDnPlacementRole(role);
@@ -2139,7 +2179,7 @@ function getRoleResourceDemand(role, tenantPlans) {
   if (dnRole && tenant) return {
     cpu: tenant.dnCores,
     memory: tenant.dnMemoryGb,
-    disk: tenant.futureDataTb / Math.max(1, tenant.shardCount)
+    disk: getDnGroupDataTb(tenant, dnRole.group)
   };
   if (isGtmRole(role)) return { cpu: 4, memory: 8, disk: 0 };
   if (role === "管理节点") return { cpu: 4, memory: 8, disk: 0 };
@@ -3017,6 +3057,8 @@ function buildBusinessTenantPlans(data) {
       minShards,
       businessTxnTps,
       plannedTxnTps,
+      dnHotspotFactor: workloadNumber(spec.dnHotspotFactor ?? 1, "DN 热点压力倍数", 1),
+      dnDataSkewFactor: workloadNumber(spec.dnDataSkewFactor ?? 1, "DN 数据倾斜倍数", 1),
       cnRaw,
       recommendedCnPerAz,
       cnPerAz,
@@ -3058,7 +3100,15 @@ function buildBusinessTenantPlans(data) {
       gtmLabel: "待绑定",
       gtmGroupText: "待绑定"
     };
-    return hasWorkloadSettings(spec) ? applyWorkloadSettings(plan, spec, data) : plan;
+    const finalPlan = hasWorkloadSettings(spec) ? applyWorkloadSettings(plan, spec, data) : plan;
+    const groupData = parseDnGroupData(spec.dnGroupDataInput, finalPlan);
+    if (groupData) {
+      finalPlan.dnGroupDataTb = groupData;
+      finalPlan.dnPerShardTb = Math.max(...groupData);
+      finalPlan.shardBelowMinimum ||= finalPlan.dnPerShardTb > data.maxShardTb;
+      finalPlan.dnSpecFormula += ` 逐Group容量覆盖平均容量：${groupData.map((value,i)=>`G${i+1}=${round(value)}TB`).join("、")}，最大 ${round(finalPlan.dnPerShardTb)}TB。`;
+    }
+    return finalPlan;
   });
   assertPlanningScale(plans.reduce((sum, tenant) => sum + tenant.totalCn + tenant.dnInstances, 0), "instances");
   return plans;
@@ -3554,6 +3604,18 @@ function renderBusinessTenantEditor() {
         <label class="field compact-field">
           <span>数据量 TB（业务预计体量）</span>
           <input class="tenant-input" data-mode="business" data-index="${index}" data-key="dataTb" type="number" min="0.1" step="0.1" value="${tenant.dataTb}">
+        </label>
+        <label class="field compact-field">
+          <span>DN 热点压力倍数（相对平均，1 为均匀假设）</span>
+          <input class="tenant-input" data-mode="business" data-index="${index}" data-key="dnHotspotFactor" type="number" min="1" step="0.1" value="${escapeAttr(tenant.dnHotspotFactor ?? 1)}">
+        </label>
+        <label class="field compact-field">
+          <span>DN 数据倾斜倍数（最大分片/平均，1 为均匀假设）</span>
+          <input class="tenant-input" data-mode="business" data-index="${index}" data-key="dnDataSkewFactor" type="number" min="1" step="0.1" value="${escapeAttr(tenant.dnDataSkewFactor ?? 1)}">
+        </label>
+        <label class="field compact-field">
+          <span>各Group当前数据TB（可选JSON数组，G1起，合计等于租户数据量）</span>
+          <input class="tenant-input" data-mode="business" data-index="${index}" data-key="dnGroupDataInput" value="${escapeAttr(tenant.dnGroupDataInput ?? '')}" placeholder="[1.5, 0.5, 0.5, 0.5]">
         </label>
         <label class="field compact-field tenant-node-field ${tenant.workloadMode === "split" ? "hidden" : ""}">
           <span>CN 节点/单生产 AZ（${tenant.cnPerAzManual ? "手工" : "自动"}）</span>
