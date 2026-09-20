@@ -1286,7 +1286,12 @@ function getDnTakeoverCapacity(data) {
     const requiredMemory = data.dnReferenceMemoryGb*ratio;
     const hotspotFactor = workloadNumber(tenant.dnHotspotFactor ?? 1, "DN 热点压力倍数", 1);
     const effectiveHotspotFactor = Math.min(hotspotFactor, tenant.shardCount);
-    const target = tenant.plannedTxnTps/tenant.shardCount * effectiveHotspotFactor;
+    const hasGroupTps = Array.isArray(tenant.dnGroupTps);
+    const target = hasGroupTps ? Math.max(...tenant.dnGroupTps)
+      : tenant.plannedTxnTps/tenant.shardCount * effectiveHotspotFactor;
+    const targetDescription = hasGroupTps
+      ? `逐Group规划等效TPS ${tenant.dnGroupTps.map((value,i)=>`G${i+1}=${round(value)}`).join("、")}；最热Group ${round(target)}TPS。客户分摊假设，非实测；替代热点倍数，不再次乘增长；跨分片事务不能直接按此拆分`
+      : `完整规划 ${round(tenant.plannedTxnTps)}TPS / ${tenant.shardCount} Group × min(热点倍数 ${hotspotFactor}, Group数 ${tenant.shardCount}) = 最热Group ${round(target)}TPS（${hotspotFactor===1?"均匀负载假设":"客户热点压力假设，非实测"}，不超过租户总TPS；仅用于校验，不自动扩容）`;
     const dataSkewFactor = workloadNumber(tenant.dnDataSkewFactor ?? 1, "DN 数据倾斜倍数", 1);
     const effectiveDataSkewFactor = Math.min(dataSkewFactor, tenant.shardCount);
     const averageDataTb = tenant.futureDataTb/tenant.shardCount;
@@ -1307,7 +1312,7 @@ function getDnTakeoverCapacity(data) {
     const status = error ? "必要条件不足" : !memoryEnough ? "性能未评估" : "容量算式满足，接管未验证";
     return {tenant:key,evaluated:memoryEnough,error,status,target,dataTb,requiredMemory,perReplicaTps,hotspotFactor,effectiveHotspotFactor,
       performanceEnough,storageEnough,physicalGaps,averageDataTb,dataSkewFactor,effectiveDataSkewFactor,
-      text:`${name} DN 单副本接管容量：${status}。完整规划 ${round(tenant.plannedTxnTps)}TPS / ${tenant.shardCount} Group × min(热点倍数 ${hotspotFactor}, Group数 ${tenant.shardCount}) = 最热Group ${round(target)}TPS（${hotspotFactor===1?"均匀负载假设":"客户热点压力假设，非实测"}，不超过租户总TPS；仅用于校验，不自动扩容）；单DN ${tenant.dnCores}C/${tenant.dnMemoryGb}GB，${memoryEnough?`有效标定 ${data.dnReferenceTps}TPS × min(1, ${tenant.dnCores}/${data.dnReferenceCores}) = ${round(perReplicaTps)}TPS，不再次扣减水位、不向上外推`:`内存低于按标定比例需要的 ${round(requiredMemory)}GB，性能不推算`}；${dataDescription}；物理副本覆盖错误场景 ${physicalGaps} 项。${scope}`};
+      text:`${name} DN 单副本接管容量：${status}。${targetDescription}；单DN ${tenant.dnCores}C/${tenant.dnMemoryGb}GB，${memoryEnough?`有效标定 ${data.dnReferenceTps}TPS × min(1, ${tenant.dnCores}/${data.dnReferenceCores}) = ${round(perReplicaTps)}TPS，不再次扣减水位、不向上外推`:`内存低于按标定比例需要的 ${round(requiredMemory)}GB，性能不推算`}；${dataDescription}；物理副本覆盖错误场景 ${physicalGaps} 项。${scope}`};
   });
 }
 
@@ -1332,10 +1337,11 @@ function getDnHostPressure(data) {
       if (roleCounts.get(role)!==1 || groups.has(groupKey)) {reasons.add("重复角色或同Group副本同机");return;}
       groups.add(groupKey);
       if (!capacity?.evaluated || !(capacity.perReplicaTps>0)) {reasons.add("部分租户缺少可用吞吐标定");return;}
-      const requiredCpu = Math.ceil(capacity.target / capacity.perReplicaTps * tenant.dnCores);
+      const targetTps = tenant.dnGroupTps?.[parsed.group-1] ?? capacity.target;
+      const requiredCpu = Math.ceil(targetTps / capacity.perReplicaTps * tenant.dnCores);
       extraCpu += Math.max(0,requiredCpu-tenant.dnCores);
       groupCount++;
-      details.push({tenant:parsed.tenant,group:parsed.group,allocatedCpu:tenant.dnCores,requiredCpu});
+      details.push({tenant:parsed.tenant,group:parsed.group,allocatedCpu:tenant.dnCores,requiredCpu,targetTps});
     });
     const evaluated = reasons.size===0;
     const pressureCpu = evaluated ? audit.used.cpu+extraCpu : null;
@@ -2142,6 +2148,24 @@ function parseCnTenant(role) {
 
 function getServerCnTenants(server) {
   return [...new Set(server.roles.map(parseCnTenant).filter(Boolean))];
+}
+
+function parseDnGroupTps(raw, tenant) {
+  if (raw == null || String(raw).trim() === "") return null;
+  let values;
+  try { values = JSON.parse(raw); } catch {
+    throw new PlanningInputError("逐Group规划TPS必须是JSON数字数组。");
+  }
+  if (!Array.isArray(values) || values.length !== tenant.shardCount
+    || !values.every(value=>typeof value === "number" && Number.isFinite(value) && value>=0)) {
+    throw new PlanningInputError(`逐Group规划TPS必须包含 ${tenant.shardCount} 个非负有限数字。`);
+  }
+  const total = values.reduce((sum,value)=>sum+value,0);
+  if (!Number.isFinite(total) || !(tenant.plannedTxnTps>0)
+    || Math.abs(total-tenant.plannedTxnTps)>Math.max(1e-9,tenant.plannedTxnTps*1e-9)) {
+    throw new PlanningInputError(`逐Group等效TPS合计必须等于租户规划TPS ${tenant.plannedTxnTps}，须使用同一规划期与事务口径。`);
+  }
+  return values;
 }
 
 function parseDnGroupData(raw, tenant) {
@@ -3108,6 +3132,8 @@ function buildBusinessTenantPlans(data) {
       finalPlan.shardBelowMinimum ||= finalPlan.dnPerShardTb > data.maxShardTb;
       finalPlan.dnSpecFormula += ` 逐Group容量覆盖平均容量：${groupData.map((value,i)=>`G${i+1}=${round(value)}TB`).join("、")}，最大 ${round(finalPlan.dnPerShardTb)}TB。`;
     }
+    const groupTps = parseDnGroupTps(spec.dnGroupTpsInput, finalPlan);
+    if (groupTps) finalPlan.dnGroupTps = groupTps;
     return finalPlan;
   });
   assertPlanningScale(plans.reduce((sum, tenant) => sum + tenant.totalCn + tenant.dnInstances, 0), "instances");
@@ -3616,6 +3642,10 @@ function renderBusinessTenantEditor() {
         <label class="field compact-field">
           <span>各Group当前数据TB（可选JSON数组，G1起，合计等于租户数据量）</span>
           <input class="tenant-input" data-mode="business" data-index="${index}" data-key="dnGroupDataInput" value="${escapeAttr(tenant.dnGroupDataInput ?? '')}" placeholder="[1.5, 0.5, 0.5, 0.5]">
+        </label>
+        <label class="field compact-field">
+          <span>各Group规划等效TPS（可选JSON数组，合计等于租户规划TPS）</span>
+          <input class="tenant-input" data-mode="business" data-index="${index}" data-key="dnGroupTpsInput" value="${escapeAttr(tenant.dnGroupTpsInput ?? '')}" placeholder="[2000, 1000, 1000, 1000]">
         </label>
         <label class="field compact-field tenant-node-field ${tenant.workloadMode === "split" ? "hidden" : ""}">
           <span>CN 节点/单生产 AZ（${tenant.cnPerAzManual ? "手工" : "自动"}）</span>
