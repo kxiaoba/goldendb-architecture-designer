@@ -2,6 +2,17 @@
 
 ## 当前检查点
 
+- 2026-09-29发布授权：用户要求提交、推送远端master及更新Pages。本次纳入此前本地保存的E1、R09-C1/C2/C3、在线跑批输入整理及其测试记录；银行A/B类仅保存暂缓提案，不开发。下方“未发布”为历史验收状态。发布前重跑专项与相邻回归，提交号、Pages任务和线上HTML/JS/CSS核验另存 `../../outputs/goldendb-release-20260929/`。R09/R12单实例适配及其他未关闭项不因发布而视为完成。
+
+- 2026-09-28 R09-C3本地完成：修正缺审计时Excel误报通过、风险表跳过及未知需求误称超限；统一资源红线、物理服务器说明、清单与风险表状态，未知水位不填0%。正常数值、规格、节点数和落位规则未改。专项22+相邻回归262共284项通过，缺审计工作簿1681单元格一致。见 `remediation-audit-status.md`；快照before/after-audit-status及 `audit-status/checkpoint.json` 位于 `../../outputs/goldendb-remediation-20260928/`。银行A/B类只存入 `banking-business-classification-proposal.md`，暂缓开发，需另获确认。下一批继续R09/R12单实例不可拆分及异构规格候选适配，不重复本次状态修改；其余性能证据、IO网络、同步容灾、S02/S03未关闭。本批及此前本地改动均未提交发布。
+
+- 2026-09-28本地完成：接续中断的R09-C2未知资源拒绝，新增在线/跑批输入分组说明、低频设置折叠及计算口径说明；不改变既有字段、默认值和规划公式。新专项36、扩大回归420，共456项通过；真实Excel1411单元格一致，窄栏/手机/桌面截图已检查。计划及结果见 `remediation-input-clarity.md`、`remediation-unknown-resource.md`，存档 `../../outputs/goldendb-remediation-20260928/` 的before/after快照和checkpoint.json。此前E1/C1未提交修改保留，本轮未提交/推送/发布。下次先读此检查点，从R09/R12单实例不可拆分、缺规格输出语义及完整身份校验继续；随后结构化性能证据/IO网络/同步容灾、S02磁盘、S03行业和原生Office。不要重复套用B4b或把当前局部回归视为所有遗留已完成。
+
+- 2026-09-20 R09-C1本地完成：复核发现可用资源最低值补高会掩盖不足，优先统一独立/混部估算和实际水位资源余额，去掉1核/1GB/0.1TB补值及估算提前取整，非法预留/容量/数值下溢拒绝。387项专项及扩大回归通过，实际Excel1673单元格一致。详见 `remediation-resource-boundary.md`；前后快照和 `boundary-regression/` 证据位于 `../../outputs/goldendb-spec-remediation-20260920/`。下一步R09/R12单实例适配、未知资源审计边界，再结构化证据/瓶颈/同步容灾和S02/S03。本批与E1均未提交发布；R09/R12未整体关闭。
+
+- 2026-09-20 S01b2b-E1本地完成：统一CN在线/跑批、逐租户DN及联合负载的性能证据状态，区分来源已填待核验、参考示例和缺失；反推不宣称性能验证。联动计算过程、风险和Excel，不改变数值、装箱或硬红线。267项专项/回归通过，实际Excel1673单元格一致。详见 `remediation-performance-evidence.md`，快照及证据 `../../outputs/goldendb-spec-remediation-20260920/`。下一步结构化证据与适用性/瓶颈核验，再同步容灾和S02/S03；本批未提交发布。
+- 发布核验补记：逐Group TPS批次已提交master 30d3776，Pages任务35479049797成功，HTML/JS/CSS哈希一致，证据 `../../outputs/goldendb-spec-remediation-20260920/pages-release-30d3776.json`。下方“未发布”为历史状态。
+
 - 2026-09-20 发布授权：用户要求提交、推送master及更新Pages。本次发布S01b3b2b2b3逐Group规划TPS及对应测试/续接文档；250项测试证据保留。下方“未发布”为历史验收状态，实测证据/瓶颈、同步容灾和S02/S03仍未关闭。部署结果与线上文件核验另存本次发布证据。
 
 - 2026-09-20 S01b3b2b2b3本地完成：可选逐Group规划等效TPS清单，数量/合计严格匹配；单副本校验最大Group，宿主机压力按实际对应Group目标计算，保留实例核数下限。未填清单保持原热点假设，不改分片/规格/装箱。250项专项及回归通过，实际Excel1652单元格一致。计划/边界/续接见 `remediation-dn-group-tps.md`；快照及证据 `../../outputs/goldendb-spec-remediation-20260920/`。下一次客户实测证据、标定适用性及IO网络/DN-GTM瓶颈，再同步容灾、S02/S03；本批未提交发布。

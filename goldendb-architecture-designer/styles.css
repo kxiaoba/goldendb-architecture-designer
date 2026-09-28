@@ -176,6 +176,15 @@ h3 {
 
 .workload-settings { min-width: 0; border-block: 1px solid var(--line); padding: 12px 0; margin-bottom: 12px; }
 .workload-settings h4 { font-size: 13px; margin: 10px 0; }
+.workload-settings h5 { font-size: 13px; margin: 16px 0 10px; }
+.workload-help { font-size: 12px; line-height: 1.65; color: var(--muted); overflow-wrap: anywhere; margin: 10px 0 16px; }
+.workload-options { min-width: 0; border-block: 1px solid var(--line); padding: 12px 0; margin: 12px 0; }
+.workload-options summary { cursor: pointer; font-size: 13px; overflow-wrap: anywhere; }
+.workload-options[open] summary { margin-bottom: 12px; }
+.workload-settings { container-type: inline-size; }
+@container (max-width: 460px) {
+  .workload-settings .grid-two { grid-template-columns: minmax(0, 1fr); }
+}
 .role-spec { display: block; white-space: normal; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; font-weight: 400; }
 .physical-instance-specs small { display: block; overflow-wrap: anywhere; line-height: 1.5; }
 

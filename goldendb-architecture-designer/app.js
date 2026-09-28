@@ -1316,6 +1316,29 @@ function getDnTakeoverCapacity(data) {
   });
 }
 
+function getPerformanceEvidence(data) {
+  if (data.reverse) return [{component:"CN/DN/GTM",status:"未评估",verified:false,
+    text:"性能证据：资源反推仅提供资源容量，未提供匹配业务负载和实测标定，不能由资源充足判定性能已验证。"}];
+  const rows = [];
+  data.tenantPlans.forEach(tenant=>{
+    const name = displayTenantKey(getTenantKey(tenant),data.tenantPlans);
+    const workloads = tenant.cnWorkloads?.length ? tenant.cnWorkloads : [{label:"业务",benchmarkSource:""}];
+    workloads.forEach(workload=>{
+      const source = String(workload.benchmarkSource ?? "").trim();
+      const status = source ? "来源已填写，待核验" : "未提供客户证据";
+      rows.push({component:`${name} ${workload.label} CN`,status,verified:false,
+        text:`${name} ${workload.label} CN 性能证据：${status}。${source?`来源声明：${source}。`:""}标定机型、数据库版本、SQL/事务模型、并发与延迟、水位口径及规划规格适用性尚未经本工具核验，容量算式通过不等于实测性能通过。`});
+    });
+    const source = String(data.dnCalibration?.source ?? "").trim();
+    const status = source ? "来源已填写，待核验" : data.dnCalibration?.requiresEvidence===false ? "参考示例，非客户实测" : "未提供客户证据";
+    rows.push({component:`${name} DN`,status,verified:false,
+      text:`${name} DN 性能证据：${status}。${source?`全局来源声明：${source}。`:""}全局标定对本租户SQL模型的适用性未核验；热点、逐Group TPS及数据清单为客户规划输入，不作为已验证证据。`});
+  });
+  rows.push({component:"联合负载",status:"未评估",verified:false,
+    text:"联合性能证据：未评估IOPS、网络、日志回放、DN/GTM瓶颈及多租户峰值干扰。需要同版本、同规格、同业务模型联合压测；不能以CPU/内存/磁盘容量算式替代。"});
+  return rows;
+}
+
 function getDnHostPressure(data) {
   const servers = getPlanServers(data);
   const capacities = new Map(getDnTakeoverCapacity(data).map(item=>[item.tenant,item]));
@@ -1803,13 +1826,24 @@ function calculateComponentServerCounts(config) {
   };
 }
 
+function getUsableServerResources(spec, reserveRatio = 0) {
+  const reserve = workloadNumber(reserveRatio, "服务器资源预留比例", 0, false, 0.8);
+  const usable = {
+    cpu: workloadNumber(spec.cores, "服务器物理核数", Number.MIN_VALUE) * (1-reserve),
+    memory: workloadNumber(spec.memoryGb, "服务器内存GB", Number.MIN_VALUE) * (1-reserve),
+    disk: workloadNumber(spec.diskTb, "服务器磁盘TB", Number.MIN_VALUE) * (1-reserve)
+  };
+  if (!Object.values(usable).every(value=>Number.isFinite(value)&&value>0)) {
+    throw new PlanningInputError("扣除预留后的服务器资源超出有效数值范围。");
+  }
+  return usable;
+}
+
 function calculateComponentRequirement(demand, spec, reserveRatio) {
   if (!demand.instances) {
     return { servers: 0, byInstances: 0, byCpu: 0, byMemory: 0, byDisk: 0, byAffinity: 0, usableCores: 0, usableMemoryGb: 0, usableDiskTb: 0 };
   }
-  const usableCores = Math.max(1, Math.floor(spec.cores * (1 - reserveRatio)));
-  const usableMemoryGb = Math.max(1, Math.floor(spec.memoryGb * (1 - reserveRatio)));
-  const usableDiskTb = Math.max(0.1, spec.diskTb * (1 - reserveRatio));
+  const {cpu:usableCores, memory:usableMemoryGb, disk:usableDiskTb} = getUsableServerResources(spec,reserveRatio);
   const cpuPerInstance = demand.cpuCores / Math.max(1, demand.instances);
   const memoryPerInstance = demand.memoryGb / Math.max(1, demand.instances);
   const diskPerInstance = demand.diskTb / Math.max(1, demand.instances);
@@ -1868,9 +1902,7 @@ function calculateMixedServerAnalysis(keys, config) {
     memoryGb: total.memoryGb + config.componentDemands[key].memoryGb,
     diskTb: total.diskTb + config.componentDemands[key].diskTb
   }), { cpuCores: 0, memoryGb: 0, diskTb: 0 });
-  const usableCores = Math.max(1, Math.floor(hostSpec.cores * (1 - config.reserveRatio)));
-  const usableMemoryGb = Math.max(1, Math.floor(hostSpec.memoryGb * (1 - config.reserveRatio)));
-  const usableDiskTb = Math.max(0.1, hostSpec.diskTb * (1 - config.reserveRatio));
+  const {cpu:usableCores, memory:usableMemoryGb, disk:usableDiskTb} = getUsableServerResources(hostSpec,config.reserveRatio);
   const densityFloor = Math.max(...keys.map((key) => Math.ceil(config.componentDemands[key].instances / config.componentSpecs[key].maxInstances)));
   const affinityFloor = Math.max(...keys.map((key) => Math.max(
     config.componentDemands[key].antiAffinityFloor || 0,
@@ -2207,39 +2239,52 @@ function getRoleResourceDemand(role, tenantPlans) {
   };
   if (isGtmRole(role)) return { cpu: 4, memory: 8, disk: 0 };
   if (role === "管理节点") return { cpu: 4, memory: 8, disk: 0 };
-  return { cpu: 0, memory: 0, disk: 0 };
+  return { cpu: 0, memory: 0, disk: 0, unknown: true };
 }
 
 function getServerResourceAudit(server, config, extraDemand = null) {
   if (!server.spec) return null;
+  const issues = [];
+  const validDemand = demand => !demand.unknown && [demand.cpu,demand.memory,demand.disk].every(value=>Number.isFinite(value)&&value>=0);
   const used = server.roles.reduce((total, role) => {
     const demand = getRoleResourceDemand(role, config.tenantPlans);
+    if (!validDemand(demand)) {
+      issues.push(`组件 ${role} 的资源需求未知或非法`);
+      return total;
+    }
     return { cpu: total.cpu + demand.cpu, memory: total.memory + demand.memory, disk: total.disk + demand.disk };
   }, { cpu: 0, memory: 0, disk: 0 });
   if (extraDemand) {
-    used.cpu += extraDemand.cpu;
-    used.memory += extraDemand.memory;
-    used.disk += extraDemand.disk;
+    if (!validDemand(extraDemand)) issues.push("待部署组件的资源需求未知或非法");
+    else {
+      used.cpu += extraDemand.cpu;
+      used.memory += extraDemand.memory;
+      used.disk += extraDemand.disk;
+    }
   }
-  const reserveRatio = Math.min(0.8, Math.max(0, config.reserveRatio || 0));
-  const usable = {
-    cpu: Math.max(1, server.spec.cores * (1 - reserveRatio)),
-    memory: Math.max(1, server.spec.memoryGb * (1 - reserveRatio)),
-    disk: Math.max(0.1, server.spec.diskTb * (1 - reserveRatio))
-  };
+  const usable = getUsableServerResources(server.spec,config.reserveRatio);
   return {
     used,
     usable,
     cpuPercent: Math.round((used.cpu / server.spec.cores) * 100),
     memoryPercent: Math.round((used.memory / server.spec.memoryGb) * 100),
     diskPercent: Math.round((used.disk / server.spec.diskTb) * 100),
-    withinWatermark: used.cpu <= usable.cpu && used.memory <= usable.memory && used.disk <= usable.disk
+    issues,
+    withinWatermark: issues.length===0 && used.cpu <= usable.cpu && used.memory <= usable.memory && used.disk <= usable.disk
   };
 }
 
 function canPlaceRoleWithinWatermark(server, role, config) {
   const audit = getServerResourceAudit(server, config, getRoleResourceDemand(role, config.tenantPlans));
-  return !audit || audit.withinWatermark;
+  return audit?.withinWatermark === true;
+}
+
+function getServerAuditStatus(server) {
+  const audit = server.resourceAudit;
+  if (!server.spec || !audit) return {status:"未评估", detail:"缺少服务器规格或资源审计，不能确认可用容量"};
+  if (audit.issues?.length) return {status:"未通过", detail:audit.issues.join("；")};
+  if (audit.withinWatermark !== true) return {status:"未通过", detail:"资源水位未通过，请核对单机容量及组件需求"};
+  return {status:"通过", detail:"资源水位算式通过，非性能或高可用认证"};
 }
 
 function placeTenantCnRolesByPool(servers, config) {
@@ -3507,7 +3552,7 @@ function render(options = {}) {
   }
   renderTopology(data);
   $("placementDetails").innerHTML = renderCnPlacementSummary(data)
-    + `<div class="dn-failure-summary">${[...getDnFailureCoverage(data),...getDnTakeoverCapacity(data),...getDnHostPressure(data)].map(item=>`<div class="${item.error?"cn-placement-error":""}">${escapeAttr(item.text)}</div>`).join("")}</div>`;
+    + `<div class="dn-failure-summary">${[...getDnFailureCoverage(data),...getDnTakeoverCapacity(data),...getDnHostPressure(data),...getPerformanceEvidence(data)].map(item=>`<div class="${item.error?"cn-placement-error":""}">${escapeAttr(item.text)}</div>`).join("")}</div>`;
   renderExcelExportSummary(data);
   renderRelationGraph(data);
 }
@@ -3691,7 +3736,11 @@ function renderWorkloadEditor(t, index) {
   const input=(key,label,min=1,step="any")=>`<label class="field"><span>${label}</span><input class="tenant-input" data-mode="business" data-index="${index}" data-key="${key}" type="number" min="${min}" step="${step}" ${["cnCores","dnCores","batchCores"].includes(key)?'list="instanceCoreTiers"':""} value="${escapeAttr(t[key]??"")}"></label>`;
   const select=(key,label,options)=>`<label class="field"><span>${label}</span><select class="tenant-input" data-mode="business" data-index="${index}" data-key="${key}">${options.map(([v,l])=>`<option value="${v}" ${t[key]===v?"selected":""}>${l}</option>`).join("")}</select></label>`;
   const modeOptions=[["auto","自动推荐"],["manual","手动指定"]];
-  const calibrationOptions=[["raw","待乘CPU水位"],["safe","已含安全水位"]];
+  const calibrationOptions=[["raw","未含安全余量"],["safe","已含安全余量"]];
+  const advanced = (key, label, content) => {
+    const previous = document.querySelector(`details[data-workload-options="${key}"][data-index="${index}"]`);
+    return `<details class="workload-options" data-workload-options="${key}" data-index="${index}" ${previous?.open ? "open" : ""}><summary>${label}</summary><div class="grid-two">${content}</div></details>`;
+  };
   const calibration = (key, label, unit) => `${select(`${key}BenchmarkMode`,`${label}能力标定输入`,[["perCore","每核标定"],["instance","整实例实测折算"]])}
     ${t[`${key}BenchmarkMode`] === "instance"
       ? input(`${key}BenchmarkRate`,`${label}标定实例吞吐（${unit}）`,0.001)+input(`${key}BenchmarkCores`,`${label}标定实例物理核`,1,"1")+input(`${key}BenchmarkMemoryGb`,`${label}标定实例内存 GB`)
@@ -3705,20 +3754,28 @@ function renderWorkloadEditor(t, index) {
       ${t.dnSizingMode==="manual"?input("dnCores","单DN物理核",1,"1")+input("dnMemoryGb","单DN内存GB"):""}</div>
     ${t.workloadMode==="split"?`<h4>在线 CN</h4><div class="grid-two">
       ${input("qps","在线峰值 SQL QPS",1,"1")}${input("onlineSqlPerTxn","在线每数据库事务平均 SQL 执行次数")}
+      </div><p class="workload-help">业务需求：QPS 是每秒 SQL 执行次数，不是 SQL 模板数或处理行数。在线 TPS = 在线 QPS ÷ 在线每事务 SQL 次数；每个生产 AZ 独立满足完整需求。</p>
+      <h5>在线处理能力（同业务模型压测）</h5><div class="grid-two">
       ${calibration("online","在线","TPS")}
       ${select("onlineCalibrationMode","在线标定口径",calibrationOptions)}
-      ${t.onlineCalibrationMode==="safe"?"":input("onlineCpuLimit","在线CPU水位（0至1）",0.01)}${input("onlineGrowth","在线年增长倍数（1.5 = 年增50%）")}
-      ${input("onlineCount","在线CN/生产AZ（0自动）",0,"1")}</div>
+      ${t.onlineCalibrationMode==="safe"?"":input("onlineCpuLimit","在线CPU水位（0至1）",0.01)}</div>
+      ${advanced("online","在线增长与数量设置",input("onlineGrowth","在线年增长倍数（1.5 = 年增50%）")+input("onlineCount","在线CN/生产AZ（0自动）",0,"1"))}
       <h4>跑批 CN</h4><div class="grid-two">
-      ${select("batchRateMode","跑批性能输入口径",[["qps","SQL QPS"],["tps","数据库事务TPS"],["sqlWindow","SQL执行总次数 / 有效窗口"],["work","业务处理量 / 有效时间"]])}
+      ${select("batchRateMode","已知的跑批业务数据",[["qps","SQL QPS"],["tps","事务 TPS"],["sqlWindow","SQL总次数 / 时限"],["work","业务总量 / 时限"]])}
       ${t.batchRateMode==="sqlWindow"?input("batchSqlTotal","SQL执行总次数（非行数或模板数）")+input("batchSqlWindow","SQL有效窗口（小时）",0.001):t.batchRateMode==="work"?input("batchAmount","业务处理总量")+input("batchWindow","有效并行窗口（小时）",0.001):input("batchRate","跑批目标 "+(t.batchRateMode==="qps"?"SQL QPS":"TPS"))}
       ${["qps","sqlWindow"].includes(t.batchRateMode)?input("batchSqlPerTxn","跑批每数据库事务平均 SQL 执行次数"):""}
+      </div><p class="workload-help">${t.batchRateMode==="sqlWindow"?"总执行次数 ÷（有效小时 × 3600）得到窗口平均 QPS，再除以跑批每事务 SQL 次数得到 TPS；平均值不代表峰值。":t.batchRateMode==="work"?"处理总量与能力标定必须采用相同业务单位，例如笔或户；总量 ÷（有效小时 × 3600）得到每秒处理目标，不能直接当作数据库 TPS。":t.batchRateMode==="tps"?"直接使用跑批数据库事务 TPS，不再除以在线或跑批 SQL 次数。":"跑批 TPS = 跑批 QPS ÷ 跑批每事务 SQL 次数。此事务口径独立于在线，不能直接沿用在线参数。"}</p>
+      <h5>跑批处理能力（独立压测，不由业务量推算）</h5><div class="grid-two">
       ${calibration("batch","跑批",t.batchRateMode==="work"?"业务单位/秒":"TPS")}
       ${select("batchCalibrationMode","跑批标定口径",calibrationOptions)}
-      ${t.batchCalibrationMode==="safe"?"":input("batchCpuLimit","跑批CPU水位（0至1）",0.01)}${input("batchGrowth","跑批年增长倍数（1.5 = 年增50%）")}
+      ${t.batchCalibrationMode==="safe"?"":input("batchCpuLimit","跑批CPU水位（0至1）",0.01)}</div>
+      <p class="workload-help">整实例实测折算：实例吞吐 ÷ 物理核数 = 每核能力。CPU 水位 0.7 表示按 70% 规划；已含安全水位时不再乘 0.7。缺少独立标定时不能可靠推算跑批 CN 数量，来源填写不等于实测已核验。</p>
+      ${advanced("batch","跑批增长、规格与数量设置",`${input("batchGrowth","跑批年增长倍数（1.5 = 年增50%）")}
       ${input("batchCount","跑批CN/生产AZ（0自动）",0,"1")}${select("batchSizingMode","跑批单CN规格",modeOptions)}
       ${t.batchSizingMode==="manual"?input("batchCores","跑批单CN物理核",1,"1")+input("batchMemoryGb","跑批单CN内存GB"):""}
-      ${input("jointDnTps","共享DN等效规划TPS（0未评估）",0)}</div>
+      `)}
+      <h5>共享 DN 负载</h5><div class="grid-two">${input("jointDnTps","共享DN等效规划TPS（0未评估）",0)}</div>
+      <p class="workload-help">在线和跑批共用 DN/GTM。此值是匹配混合 SQL 模型的规划等效 TPS，不是直接相加两种不同事务口径；0 表示尚未评估共享负载。</p>
       ${["work","sqlWindow"].includes(t.batchRateMode)?`<label class="toggle"><input type="checkbox" class="tenant-input" data-mode="business" data-index="${index}" data-key="batchWindowCheck" ${t.batchWindowCheck?"checked":""}><span>跑批窗口与故障余量校验</span></label>
       ${t.batchWindowCheck?`<div class="grid-two">${input("batchEfficiency","并行效率（0至1，需实测）",0.001)}${input("batchLostCn","整个窗口不可用CN数",0,"1")}${input("batchPauseMinutes","窗口内总停顿分钟",0)}${input("batchRetryRatio","额外重试工作量比例",0)}</div>`:""}`:""}`:""}
     </div>`;
@@ -3947,6 +4004,7 @@ function getDisasterText(mode) {
 
 function renderRisks(data) {
   const risks = getDnPlacementIssues(data).map(issue => ["risk-high", issue]);
+  getPerformanceEvidence(data).forEach(item=>risks.push(["risk-mid",item.text]));
   (data.centerQuotaAudit || []).filter(site => site.missing).forEach(site => risks.push([
     "risk-high", `${site.az} 主机配额不足：需要 ${site.required} 台，当前 ${site.available} 台，已分配 ${site.assigned} 台；不能借用其他中心主机抵消缺口。`
   ]));
@@ -4218,6 +4276,9 @@ function renderFormula(data) {
   if (data.tenantPlans.some(t=>t.cnWorkloads)) {
     $("formulaOutput").textContent = [
       "逐租户、逐场景 CN 规划（线性工程估算，非厂商性能保证）：",
+      "输入口径：在线和跑批的 SQL/事务分别换算；QPS ÷ 每事务 SQL 次数 = TPS。SQL总次数 ÷（有效小时 × 3600）仅为平均QPS；业务处理量模式使用业务单位/秒，不冒充TPS。",
+      "能力口径：每核能力来自独立标定，或由整实例实测吞吐 ÷ 标定物理核数折算。未含余量的能力乘CPU水位，已含安全水位不重复折减。规划目标按年增长倍数的规划年限次方增长；每个生产AZ独立满足完整目标，不按AZ数均摊。",
+      "数量口径：当前规格下，性能所需CN数向上取整（场景规划目标 ÷ 单CN安全能力），并叠加现有高可用与装箱约束；数量填0使用自动值，手动覆盖仍需通过容量、故障余量和资源水位校验。共享DN等效TPS为0时仍未评估，非零也需混合SQL实测支持。",
       data.dnCalibration.description,
       ...data.tenantPlans.flatMap(t=>[
         `${displayTenantKey(getTenantKey(t),data.tenantPlans)}：${t.cnSpecReason}`,
@@ -4417,6 +4478,12 @@ function getSelectedReductionMeasures(reduction) {
 
 function getResourceReductionRedlines(data) {
   const redlines = getDnPlacementIssues(data);
+  getPlanServers(data).forEach(server => {
+    if (!server.spec || !server.resourceAudit || server.resourceAudit.issues?.length) {
+      const state = getServerAuditStatus(server);
+      redlines.push(`${server.id} 资源水位${state.status}：${state.detail}。请补全或修正资源信息，不能按零占用或校验通过处理。`);
+    }
+  });
   getDnFailureCoverage(data).filter(item=>item.error).forEach(item=>redlines.push(item.text));
   getDnTakeoverCapacity(data).filter(item=>item.error).forEach(item=>redlines.push(item.text));
   getDnHostPressure(data).filter(item=>item.error).forEach(item=>redlines.push(item.text));
@@ -4484,7 +4551,8 @@ function getResourceReductionRedlines(data) {
   if (managementViolations.length) {
     redlines.push(`管理节点同机：${managementViolations.join("、")} 承载多个管理节点副本；请增加管理主机并保持一机一副本。`);
   }
-  const capacityViolations = data.reverse ? data.capacityViolations : sizing.capacityViolations;
+  const capacityViolations = (data.reverse ? data.capacityViolations : sizing.capacityViolations)
+    .filter(server => !server.resourceAudit?.issues?.length);
   if (capacityViolations.length) {
     redlines.push(`服务器安全水位超限：${capacityViolations.map((server) => server.id).join("、")}；请增加服务器或下调单机组件密度。`);
   }
@@ -4585,15 +4653,16 @@ function renderBusinessServerPlan(data) {
 function renderBusinessPhysicalServerRow(server) {
   const spec = server.spec;
   const audit = server.resourceAudit;
+  const state = getServerAuditStatus(server);
   const specText = spec
-    ? `${spec.model} · ${spec.sockets}路/${spec.cores}物理核 · ${spec.memoryGb}GB · 数据盘${spec.dataDiskTb}TB×${spec.dataDiskCount}${audit ? ` · 水位 CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / 磁盘 ${audit.diskPercent}%${audit.withinWatermark ? "（通过）" : "（超限）"}` : ""}`
+    ? `${spec.model} · ${spec.sockets}路/${spec.cores}物理核 · ${spec.memoryGb}GB · 数据盘${spec.dataDiskTb}TB×${spec.dataDiskCount}${audit && !audit.issues?.length ? ` · 水位 CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / 磁盘 ${audit.diskPercent}%` : ""}`
     : "预留机型待确认";
   return `
     <article class="server-row physical-output-row">
       <strong>${server.id}</strong>
       <span>${server.az} / ${server.rack}</span>
       <small>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")} / ${escapeAttr(server.hostGroup)}：${escapeAttr(server.roles.length ? displayRoles(server.roles).join(" / ") : "故障接管与扩容预留")}</small>
-      <i>${escapeAttr(specText)}</i>
+      <i>${escapeAttr(specText)} · ${escapeAttr(state.status)}：${escapeAttr(state.detail)}</i>
     </article>
   `;
 }
@@ -5977,6 +6046,7 @@ function buildExcelSheets(data) {
   getDnFailureCoverage(data).forEach(item => summaryRows.push(["DN故障副本覆盖", item.az || item.scenario, item.text]));
   getDnTakeoverCapacity(data).forEach(item => summaryRows.push(["DN单副本接管容量", item.status, item.text]));
   getDnHostPressure(data).forEach(item => summaryRows.push(["DN宿主机接管压力上界", item.host, item.text]));
+  getPerformanceEvidence(data).forEach(item=>summaryRows.push(["性能证据 / "+item.component,item.status,item.text]));
   (data.centerQuotaAudit || []).forEach(site => summaryRows.push(["中心主机配额", site.az,
     `需求 ${site.required} / 现有 ${site.available} / 已分配 ${site.assigned} / 缺口 ${site.missing} 台`]));
   const summarySheet = buildExcelTableSheet({
@@ -6040,6 +6110,8 @@ function buildExcelSheets(data) {
   ];
   const serverRows = servers.map((server) => {
     const audit = server.resourceAudit;
+    const state = getServerAuditStatus(server);
+    const known = Boolean(server.spec && audit && !audit.issues?.length);
     return [
       server.id,
       server.az,
@@ -6053,10 +6125,10 @@ function buildExcelSheets(data) {
       server.roles.filter(isGtmRole).length,
       server.roles.filter((role) => role === "管理节点").length,
       server.roles.map((role) => formatExcelRole(role, data.tenantPlans)).join(" / ") || "扩容预留",
-      audit?.cpuPercent ?? server.cpuLoad ?? 0,
-      audit?.memoryPercent ?? 0,
-      audit?.diskPercent ?? server.diskLoad ?? 0,
-      audit && !audit.withinWatermark ? "未通过" : "通过",
+      known ? audit.cpuPercent : "未评估",
+      known ? audit.memoryPercent : "未评估",
+      known ? audit.diskPercent : "未评估",
+      state.status,
       server.spec
         ? `${server.spec.model}；${server.spec.sockets}路/${server.spec.cores}物理核；${server.spec.memoryGb}GB；数据盘${round(server.spec.diskTb)}TB；${server.spec.network}`
         : "资源反推机型 / 待客户确认"
@@ -6129,12 +6201,12 @@ function buildExcelSheets(data) {
   if (!riskRows.length) riskRows.push(["架构红线", "通过", "整体方案", "当前方案未触发硬红线"]);
   servers.forEach((server) => {
     const audit = server.resourceAudit;
-    if (!audit) return;
+    const state = getServerAuditStatus(server);
     riskRows.push([
       "服务器水位",
-      audit.withinWatermark ? "通过" : "高风险",
+      state.status === "通过" ? "通过" : "高风险",
       `${server.id} / ${server.az}`,
-      `CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / 磁盘 ${audit.diskPercent}%；资源预留 ${round((data.reverse ? data.reserveRatio : data.serverSizing.reserveRatio) * 100)}%`
+      !server.spec || !audit || audit.issues?.length ? `${state.status}：${state.detail}` : `CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / 磁盘 ${audit.diskPercent}%；资源预留 ${round((data.reverse ? data.reserveRatio : data.serverSizing.reserveRatio) * 100)}%`
     ]);
   });
   (sizing.gtmGroupPlacementAudit?.groups || []).forEach((group) => riskRows.push([

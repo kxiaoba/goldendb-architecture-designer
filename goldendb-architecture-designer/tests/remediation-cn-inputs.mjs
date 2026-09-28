@@ -53,6 +53,7 @@ try {
  }));
  await setup();
  for(const key of ['onlineGrowth','batchGrowth']) {
+  await page.locator(`details[data-workload-options=${key.startsWith('online')?'online':'batch'}]`).evaluate(el=>el.open=true);
   const field=page.locator(`[data-key=${key}]`);await field.fill('');await field.pressSequentially('1.5');await field.blur();
   check('decimal-typing-'+key,await field.evaluate(el=>el.value==='1.5'&&el.validity.valid));
  }

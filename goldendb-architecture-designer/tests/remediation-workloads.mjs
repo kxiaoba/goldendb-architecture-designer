@@ -46,6 +46,7 @@ try{
   return {name:'joint-dn-online-floor',pass:t.plannedTxnTps===t.cnWorkloads[0].target&&t.workloadIssues.some(x=>x.includes('低于在线需求'))};
  }));
  await setup();
+ await page.locator('details[data-workload-options=online]').evaluate(el=>el.open=true);
  await page.locator('[data-key="onlineCount"]').fill('3');
  await page.locator('[data-key="onlineCount"]').dispatchEvent('change');
  results.push(await page.evaluate(()=>({name:'ui-online-count-linkage',pass:latestDesignData.tenantPlans[0].cnWorkloads[0].count===3})));
