@@ -2154,11 +2154,10 @@ function getHostSpecForKeys(keys, specs) {
 }
 
 function getEligibleServers(servers, componentKey, azIndex, tenantPool = null) {
-  const eligible = servers.filter((server) =>
-    server.componentKeys.includes(componentKey) && (!tenantPool || server.tenantPool === tenantPool)
+  return servers.filter((server) =>
+    server.azIndex === azIndex && server.componentKeys.includes(componentKey)
+      && (!tenantPool || server.tenantPool === tenantPool)
   );
-  const local = eligible.filter((server) => server.azIndex === azIndex);
-  return local.length ? local : eligible;
 }
 
 function countTenantDnRoles(server, tenantName) {
@@ -2223,31 +2222,47 @@ function getDnGroupDataTb(tenant, group) {
   return tenant.dnGroupDataTb?.[group-1] ?? tenant.futureDataTb / Math.max(1,tenant.shardCount);
 }
 
-function getRoleResourceDemand(role, tenantPlans) {
+function getRoleResourceDemand(role, tenantPlans, config = null) {
+  const unknown = { cpu: 0, memory: 0, disk: 0, unknown: true };
   const cnTenant = parseCnTenant(role);
   const dnRole = parseDnPlacementRole(role);
   const tenantName = cnTenant || dnRole?.tenant;
   const tenant = tenantPlans.find((item) => getTenantKey(item) === tenantName);
   if (cnTenant && tenant) {
-    const spec = tenant.cnRoleSpecs?.[Number(/-CN(\d+)$/.exec(role)[1])-1];
+    const ordinal = /-CN([1-9]\d*)$/.exec(role);
+    const count = tenant.cnByAz?.reduce((sum, value) => sum + value, 0) ?? tenant.totalCn;
+    const index = ordinal ? Number(ordinal[1]) - 1 : -1;
+    if (!Number.isSafeInteger(count) || index < 0 || index >= count) return unknown;
+    const spec = tenant.cnRoleSpecs?.[index];
+    // A present per-role plan is authoritative; do not hide missing entries with defaults.
+    if (tenant.cnRoleSpecs && !spec) return unknown;
     return { cpu: spec?.cores ?? tenant.cnCores, memory: spec?.memoryGb ?? tenant.cnMemoryGb, disk: 0 };
   }
-  if (dnRole && tenant) return {
-    cpu: tenant.dnCores,
-    memory: tenant.dnMemoryGb,
-    disk: getDnGroupDataTb(tenant, dnRole.group)
-  };
-  if (isGtmRole(role)) return { cpu: 4, memory: 8, disk: 0 };
-  if (role === "管理节点") return { cpu: 4, memory: 8, disk: 0 };
-  return { cpu: 0, memory: 0, disk: 0, unknown: true };
+  if (dnRole && tenant) {
+    const canonical = /-DN-G([1-9]\d*)-(Master|Slave(?:[1-9]\d*)?)$/.test(role);
+    const replica = dnRole.role === "M" ? 0 : Number(dnRole.role.slice(1));
+    if (!canonical || !Number.isSafeInteger(tenant.shardCount) || dnRole.group > tenant.shardCount
+      || !Number.isSafeInteger(tenant.replicasPerShard) || !Number.isSafeInteger(replica)
+      || replica >= tenant.replicasPerShard) return unknown;
+    return { cpu: tenant.dnCores, memory: tenant.dnMemoryGb, disk: getDnGroupDataTb(tenant, dnRole.group) };
+  }
+  if (isGtmRole(role)) return config && getGtmRolePlacements(config).some(item => item.label === role)
+    ? { cpu: 4, memory: 8, disk: 0 } : unknown;
+  if (role === "管理节点") return Number.isSafeInteger(config?.managementNodes) && config.managementNodes > 0
+    ? { cpu: 4, memory: 8, disk: 0 } : unknown;
+  return unknown;
 }
 
 function getServerResourceAudit(server, config, extraDemand = null) {
   if (!server.spec) return null;
   const issues = [];
+  const identities = new Set();
   const validDemand = demand => !demand.unknown && [demand.cpu,demand.memory,demand.disk].every(value=>Number.isFinite(value)&&value>=0);
   const used = server.roles.reduce((total, role) => {
-    const demand = getRoleResourceDemand(role, config.tenantPlans);
+    const identity = role.replace(/-Slave$/, "-Slave1");
+    if (identities.has(identity)) issues.push(`组件 ${role} 在同一服务器重复部署`);
+    identities.add(identity);
+    const demand = getRoleResourceDemand(role, config.tenantPlans, config);
     if (!validDemand(demand)) {
       issues.push(`组件 ${role} 的资源需求未知或非法`);
       return total;
@@ -2275,7 +2290,8 @@ function getServerResourceAudit(server, config, extraDemand = null) {
 }
 
 function canPlaceRoleWithinWatermark(server, role, config) {
-  const audit = getServerResourceAudit(server, config, getRoleResourceDemand(role, config.tenantPlans));
+  if (server.roles.some(existing => existing.replace(/-Slave$/, "-Slave1") === role.replace(/-Slave$/, "-Slave1"))) return false;
+  const audit = getServerResourceAudit(server, config, getRoleResourceDemand(role, config.tenantPlans, config));
   return audit?.withinWatermark === true;
 }
 
@@ -2285,6 +2301,44 @@ function getServerAuditStatus(server) {
   if (audit.issues?.length) return {status:"未通过", detail:audit.issues.join("；")};
   if (audit.withinWatermark !== true) return {status:"未通过", detail:"资源水位未通过，请核对单机容量及组件需求"};
   return {status:"通过", detail:"资源水位算式通过，非性能或高可用认证"};
+}
+
+function getInstanceFitIssues(data) {
+  const servers = getPlanServers(data);
+  const config = {...data, reserveRatio:data.reverse ? data.reserveRatio : data.serverSizing.reserveRatio};
+  const issues = [];
+  const check = (tenant, role, component, azIndex, pool = getTenantResourcePoolKey(tenant)) => {
+    const candidates = servers.filter(server => server.azIndex === azIndex
+      && server.tenantPool === pool
+      && server.componentKeys.includes(component));
+    // Missing hosts/specs have separate placement/audit diagnostics, not proof of oversizing.
+    if (!candidates.length || candidates.some(server => !server.spec)) return;
+    const demand = getRoleResourceDemand(role, data.tenantPlans, data);
+    if (demand.unknown || ![demand.cpu,demand.memory,demand.disk].every(value=>Number.isFinite(value)&&value>=0)) return;
+    if (candidates.some(server => canPlaceRoleWithinWatermark({...server,roles:[]}, role, config))) return;
+    const az = getAzNames(data.mode,data.azCount)[azIndex];
+    issues.push({role, component, azIndex, demand,
+      text:`${displayRole(role,data.tenantPlans)} / ${az} 单实例无法适配：需要 ${round(demand.cpu)}核/${round(demand.memory)}GB/${round(demand.disk)}TB；目标中心当前资源池没有任何一台候选主机在扣除预留后同时满足CPU、内存和磁盘要求。单实例不可跨服务器拆分，仅增加同规格服务器不能解决；请调整主机或实例规格，DN容量问题可重新规划分片后复算。`});
+  };
+  data.tenantPlans.forEach(tenant => {
+    let index = 0;
+    const cnByAz = tenant.cnByAz || Array.from({length:data.azCount},()=>tenant.cnPerAz);
+    cnByAz.forEach((count,azIndex)=>{
+      for(let i=0;i<count;i++) check(tenant,`${getTenantKey(tenant)}-CN${++index}`,"cn",azIndex);
+    });
+    for(let group=1;group<=tenant.shardCount;group++) {
+      for(let replica=1;replica<=tenant.replicasPerShard;replica++) {
+        const role = `${getTenantKey(tenant)}-DN-G${group}-${replica===1?"Master":`Slave${replica-1}`}`;
+        check(tenant,role,"dn",getDnReplicaAz(tenant,group,replica,data));
+      }
+    }
+  });
+  getGtmRolePlacements(data).forEach(placement =>
+    check(null,placement.label,"gtm",placement.azIndex,placement.resourcePoolKey));
+  for(let index=0;index<data.managementNodes;index++) {
+    check(null,"管理节点","management",index % data.azCount,"shared");
+  }
+  return issues;
 }
 
 function placeTenantCnRolesByPool(servers, config) {
@@ -2636,7 +2690,7 @@ function placeGtmRolesByPool(servers, config) {
   const maxPerServer = Math.max(1, config.componentSpecs?.gtm?.maxInstances || 2);
   getGtmRolePlacements(config).forEach((placement) => {
     const candidates = servers
-      .filter((server) => server.componentKeys.includes("gtm") && server.tenantPool === placement.resourcePoolKey);
+      .filter((server) => server.componentKeys.includes("gtm") && server.tenantPool === placement.resourcePoolKey && server.azIndex === placement.azIndex);
     const withoutSameGroup = candidates.filter((server) =>
       !server.roles.some((role) => getGtmRoleGroupKey(role) === placement.groupKey)
     );
@@ -2655,8 +2709,7 @@ function placeGtmRolesByPool(servers, config) {
     const target = policyCandidates.find((server) =>
       countMatchingRole(server, isGtmRole) < maxPerServer &&
       canPlaceRoleWithinWatermark(server, placement.label, config)
-    )
-      || (config.environment !== "poc" && policyCandidates.find((server) => countMatchingRole(server, isGtmRole) < maxPerServer));
+    );
     if (target) target.roles.push(placement.label);
   });
 }
@@ -2719,6 +2772,7 @@ function placeManagementRolesByPool(servers, config) {
   for (let index = 0; index < config.managementNodes; index += 1) {
     const azIndex = index % config.azCount;
     const candidates = getEligibleServers(servers, "management", azIndex, "shared")
+      .filter(server => server.azIndex === azIndex)
       .sort((a, b) => {
         const managementDelta = countRole(a, "管理节点") - countRole(b, "管理节点");
         if (managementDelta) return managementDelta;
@@ -2726,8 +2780,7 @@ function placeManagementRolesByPool(servers, config) {
         const bMixedWithGtm = b.componentKeys.includes("gtm") && b.roles.some(isGtmRole);
         return Number(bMixedWithGtm) - Number(aMixedWithGtm) || a.roles.length - b.roles.length || a.id.localeCompare(b.id);
       });
-    const target = candidates.find((server) => countRole(server, "管理节点") < 1 && canPlaceRoleWithinWatermark(server, "管理节点", config))
-      || (config.environment !== "poc" && candidates.find((server) => countRole(server, "管理节点") < 1));
+    const target = candidates.find((server) => countRole(server, "管理节点") < 1 && canPlaceRoleWithinWatermark(server, "管理节点", config));
     if (target) target.roles.push("管理节点");
   }
 }
@@ -4478,6 +4531,7 @@ function getSelectedReductionMeasures(reduction) {
 
 function getResourceReductionRedlines(data) {
   const redlines = getDnPlacementIssues(data);
+  getInstanceFitIssues(data).forEach(issue => redlines.push(issue.text));
   getPlanServers(data).forEach(server => {
     if (!server.spec || !server.resourceAudit || server.resourceAudit.issues?.length) {
       const state = getServerAuditStatus(server);
@@ -4902,7 +4956,8 @@ function renderPptRolePill(role) {
 
 function getRoleSpecLabel(role, data = latestDesignData) {
   if (!data || (!isCnRole(role) && !isDnRole(role))) return "";
-  const d = getRoleResourceDemand(role, data.tenantPlans);
+  const d = getRoleResourceDemand(role, data.tenantPlans, data);
+  if (d.unknown) return "规格未评估（角色身份非法或未知）";
   return `${d.cpu}物理核 / ${d.memory}GB${isDnRole(role) ? ` / 数据${round(d.disk)}TB` : ""}`;
 }
 
@@ -6159,9 +6214,10 @@ function buildExcelSheets(data) {
     isCnRole(role) ? "CN" : isDnRole(role) ? "DN" : isGtmRole(role) ? "GTM" : "管理节点",
     formatExcelRole(role, data.tenantPlans),
     role,
-    getRoleResourceDemand(role,data.tenantPlans).cpu,
-    getRoleResourceDemand(role,data.tenantPlans).memory,
-    getRoleResourceDemand(role,data.tenantPlans).disk
+    ...["cpu", "memory", "disk"].map(key => {
+      const demand = getRoleResourceDemand(role, data.tenantPlans, data);
+      return demand.unknown ? "未评估" : demand[key];
+    })
   ])));
   const instanceSheet = buildExcelTableSheet({
     name: "组件实例",

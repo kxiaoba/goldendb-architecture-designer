@@ -49,6 +49,7 @@ try {
   check('read-only-audit',JSON.stringify(d)===before);
   return checks;
  }));
+ await page.locator('[data-workload-options=online] summary').click();
  await page.locator('[data-key=onlineCount]').fill('3');
  results.push(await page.evaluate(()=>{const a=getActualCnCapacityAudits(latestDesignData)[0];return {name:'manual-linkage-recovery',pass:a.actual===3&&a.failureCapacity===1120&&!a.error};}));
  results.push(await page.evaluate(()=>{
