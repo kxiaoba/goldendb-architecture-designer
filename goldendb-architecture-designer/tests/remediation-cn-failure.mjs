@@ -42,7 +42,7 @@ try {
   const role=hosts[1].roles.find(online);hosts[1].roles=hosts[1].roles.filter(r=>r!==role);hosts[0].roles.push(role);
   const mix=getActualCnCapacityAudits(mixed)[0];
   check('physical-host-loss-not-one-instance',mix.actual===2&&mix.largestHost===2&&mix.failureCapacity===0);
-  hosts[0].roles.push(role);check('duplicate-not-extra-capacity',getActualCnCapacityAudits(mixed)[0].actual===2);
+  hosts[0].roles.push(role);check('ambiguous-duplicate-excluded',getActualCnCapacityAudits(mixed)[0].actual===1);
   const window=structuredClone(d);window.tenantPlans[0].cnWorkloads[1].windowAudit={};
   check('window-batch-not-double-audited',getActualCnCapacityAudits(window).length===3);
   const reverse=structuredClone(d);reverse.reverse=true;check('reverse-no-invented-tps',getActualCnCapacityAudits(reverse).length===0);

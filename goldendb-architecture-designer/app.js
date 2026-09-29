@@ -1225,6 +1225,7 @@ function getDnPlacementIssues(data) {
 
 function getDnFailureCoverage(data) {
   const servers = getPlanServers(data);
+  const identity = getPlanRoleIdentityAudit(data);
   const azNames = getAzNames(data.mode, data.azCount);
   return data.tenantPlans.flatMap(tenant => {
     const key = getTenantKey(tenant);
@@ -1232,8 +1233,9 @@ function getDnFailureCoverage(data) {
     servers.forEach((host, hostIndex) => host.roles.forEach(role => {
       const parsed = parseDnPlacementRole(role);
       if (parsed?.tenant !== key) return;
-      if (!roles.has(role)) roles.set(role, []);
-      roles.get(role).push({host,hostIndex});
+      const canonical = role.replace(/-Slave$/, "-Slave1");
+      if (!roles.has(canonical)) roles.set(canonical, []);
+      roles.get(canonical).push({host,hostIndex});
     }));
     // Only uniquely placed, expected replicas on resource-valid hosts are evidence.
     const groups = Array.from({length:tenant.shardCount}, (_,i) => {
@@ -1241,13 +1243,14 @@ function getDnFailureCoverage(data) {
       for (let replica=1; replica<=tenant.replicasPerShard; replica++) {
         const role = `${key}-DN-G${i+1}-${replica===1?"Master":`Slave${replica-1}`}`;
         const placed = roles.get(role) || [];
-        if (placed.length===1 && placed[0].host.resourceAudit?.withinWatermark) copies.push(placed[0]);
+        if (placed.length===1 && identity.validRoleHosts.get(role) === placed[0].host
+          && placed[0].host.resourceAudit?.withinWatermark) copies.push(placed[0]);
       }
       return {group:i+1,copies};
     });
     const describe = ids => ids.length ? `${ids.slice(0,12).map(n=>`G${n}`).join("、")}${ids.length>12?`等${ids.length}个Group`:""}` : "无";
     const name = displayTenantKey(key,data.tenantPlans);
-    const scope = "只检查预期副本唯一落位及服务器水位；存活不等于可提升为主，gSync配置、复制追平、仲裁、接管性能和RPO/RTO未验证，不累加从副本TPS。";
+    const scope = "只检查预期副本唯一落位、目标中心/资源池/组件类型及服务器水位；存活不等于可提升为主，gSync配置、复制追平、仲裁、接管性能和RPO/RTO未验证，不累加从副本TPS。";
     const normalMissing = groups.filter(g=>!g.copies.length).map(g=>g.group);
     const rows = [{tenant:key,scenario:"normal",missing:normalMissing,error:normalMissing.length>0,
       text:`${name} DN 正常副本覆盖：无有效副本Group ${describe(normalMissing)}。${scope}`}];
@@ -2649,6 +2652,90 @@ function getGtmGroupPlacementAudit(serverPlan, config) {
   return { groups, complete: groups.every((group) => group.actual === group.expected) };
 }
 
+function getPlanRoleIdentityIssues(data) {
+  return getPlanRoleIdentityAudit(data).issues;
+}
+
+function getPlanRoleIdentitySummary(data) {
+  const audit = getPlanRoleIdentityAudit(data);
+  return {
+    complete: audit.complete,
+    text: `实例身份完整性：${audit.complete ? "通过" : `未通过（${audit.issues.length}项）`}。数量统计不等于有效部署；按唯一实例、目标中心、资源池、组件类型及控制面规划核对。资源水位、故障容量和性能证据另行校验。`
+  };
+}
+
+function getPlanRoleIdentityAudit(data) {
+  const issues = [];
+  const expected = new Map();
+  const actual = new Map();
+  const azNames = getAzNames(data.mode, data.azCount);
+  const canonical = role => role.replace(/-Slave$/, "-Slave1");
+  const add = (role, azIndex, pool, component) => {
+    if (expected.has(role)) issues.push(`规划实例身份重复：${role}，请核对租户ID及绑定配置。`);
+    expected.set(role, {azIndex, pool, component});
+  };
+  data.tenantPlans.forEach(tenant => {
+    const key = getTenantKey(tenant), pool = getTenantResourcePoolKey(tenant);
+    let ordinal = 0;
+    const counts = tenant.cnByAz || Array.from({length:data.azCount}, () => tenant.cnPerAz);
+    counts.forEach((count, azIndex) => {
+      for (let i = 0; i < count; i++) add(`${key}-CN${++ordinal}`, azIndex, pool, "cn");
+    });
+    for (let group = 1; group <= tenant.shardCount; group++) {
+      for (let replica = 1; replica <= tenant.replicasPerShard; replica++) {
+        add(`${key}-DN-G${group}-${replica === 1 ? "Master" : `Slave${replica-1}`}`,
+          getDnReplicaAz(tenant, group, replica, data), pool, "dn");
+      }
+    }
+  });
+  const distributed = data.tenantPlans.filter(tenant => tenant.isDistributed).length;
+  const binding = data.gtmBinding;
+  const groups = binding?.kind === "dedicated" ? distributed : binding?.kind === "shared" ? 1 : 0;
+  const validBinding = binding && ["none", "shared", "dedicated"].includes(binding.kind)
+    && binding.groupCount === groups && (distributed > 0 ? groups > 0 : binding.kind === "none")
+    && Number.isSafeInteger(data.gtmNodes) && data.gtmNodes >= 0
+    && (groups === 0 ? data.gtmNodes === 0 : Number.isSafeInteger(data.gtmReplicasPerGroup)
+      && data.gtmReplicasPerGroup > 0 && data.gtmNodes === groups * data.gtmReplicasPerGroup);
+  if (!validBinding) issues.push("GTM绑定结构不一致：请核对共享/专属模式、分布式租户数、Group数、每Group副本数与GTM总数；不能以总实例数相等替代逐副本校验。");
+  else getGtmRolePlacements(data).forEach(item => add(item.label, item.azIndex, item.resourcePoolKey, "gtm"));
+
+  const managementByAz = Array(data.azCount).fill(0);
+  getPlanServers(data).forEach(server => {
+    server.roles.forEach(role => {
+      if (role === "管理节点") {
+        if (Number.isInteger(server.azIndex) && server.azIndex >= 0 && server.azIndex < data.azCount) managementByAz[server.azIndex]++;
+        else issues.push(`${server.id} 管理节点目标中心无效。`);
+        if (server.tenantPool !== "shared" || !server.componentKeys.includes("management")) {
+          issues.push(`${server.id} 管理节点资源池或组件类型不符：应为共享资源池管理主机。`);
+        }
+        return;
+      }
+      const identity = canonical(role);
+      if (!actual.has(identity)) actual.set(identity, []);
+      actual.get(identity).push(server);
+      const target = expected.get(identity);
+      if (!target) issues.push(`${server.id} 非预期实例：${role}，未纳入当前租户/Group规划。`);
+      else {
+        if (server.azIndex !== target.azIndex) issues.push(`${role} 目标中心不符：${server.id}，应在${azNames[target.azIndex]}。`);
+        if (server.tenantPool !== target.pool) issues.push(`${role} 资源池不符：${server.id}，应属于${target.pool}。`);
+        if (!server.componentKeys.includes(target.component)) issues.push(`${role} 组件主机类型不符：${server.id}未承载${target.component.toUpperCase()}。`);
+      }
+    });
+  });
+  const validRoleHosts = new Map();
+  expected.forEach((target, role) => {
+    const hosts = actual.get(role) || [];
+    if (hosts.length !== 1) issues.push(`实例身份校验未通过：${role} 实际落位${hosts.length}次（应为1次）${hosts.length ? `，服务器${hosts.map(host=>host.id).join("、")}` : ""}；不能用重复实例抵消缺失实例。`);
+    else if (hosts[0].azIndex === target.azIndex && hosts[0].tenantPool === target.pool
+      && hosts[0].componentKeys.includes(target.component)) validRoleHosts.set(role, hosts[0]);
+  });
+  if (!Number.isSafeInteger(data.managementNodes) || data.managementNodes < 0) issues.push("管理节点规划总数非法，无法校验逐中心分布。");
+  else distributeCount(data.managementNodes, data.azCount).forEach((count, index) => {
+    if (managementByAz[index] !== count) issues.push(`${azNames[index]} 管理节点数量不符：实际${managementByAz[index]}，规划${count}；不能跨中心补数。`);
+  });
+  return {issues, validRoleHosts, complete: issues.length === 0};
+}
+
 function getDnCenterDistribution(serverPlan, mode, azCount) {
   const centers = getAzNames(mode, azCount).map((az) => {
     const servers = serverPlan.filter((server) => server.az === az);
@@ -3604,7 +3691,8 @@ function render(options = {}) {
     $("businessServerBlock").classList.remove("hidden");
   }
   renderTopology(data);
-  $("placementDetails").innerHTML = renderCnPlacementSummary(data)
+  const identitySummary = getPlanRoleIdentitySummary(data);
+  $("placementDetails").innerHTML = `<div class="${identitySummary.complete ? "cn-placement-ok" : "cn-placement-error"}">${escapeAttr(identitySummary.text)}</div>` + renderCnPlacementSummary(data)
     + `<div class="dn-failure-summary">${[...getDnFailureCoverage(data),...getDnTakeoverCapacity(data),...getDnHostPressure(data),...getPerformanceEvidence(data)].map(item=>`<div class="${item.error?"cn-placement-error":""}">${escapeAttr(item.text)}</div>`).join("")}</div>`;
   renderExcelExportSummary(data);
   renderRelationGraph(data);
@@ -4531,6 +4619,7 @@ function getSelectedReductionMeasures(reduction) {
 
 function getResourceReductionRedlines(data) {
   const redlines = getDnPlacementIssues(data);
+  redlines.push(...getPlanRoleIdentityIssues(data));
   getInstanceFitIssues(data).forEach(issue => redlines.push(issue.text));
   getPlanServers(data).forEach(server => {
     if (!server.spec || !server.resourceAudit || server.resourceAudit.issues?.length) {
@@ -5427,6 +5516,7 @@ function renderServerRoleDetail(roles) {
 function getActualCnCapacityAudits(data) {
   if (data.reverse) return [];
   const servers = getPlanServers(data);
+  const identity = getPlanRoleIdentityAudit(data);
   const productionSites = data.mode === "local1az" ? 1 : 2;
   return data.tenantPlans.flatMap(tenant => {
     const workloads = tenant.cnWorkloads || [{key:"online", label:"业务", unit:"TPS",
@@ -5434,10 +5524,11 @@ function getActualCnCapacityAudits(data) {
     // Window-enabled batch has its own duration/failure audit, not an average-rate substitute.
     return workloads.filter(w => !w.windowAudit).flatMap(w => getAzNames(data.mode, data.azCount).map((az, azIndex) => {
       const seen = new Set();
-      const hostCounts = servers.filter(h => h.az === az).map(host => {
+      const hostCounts = servers.filter(h => h.azIndex === azIndex).map(host => {
         if (!host.resourceAudit?.withinWatermark) return 0;
         return host.roles.filter(role => {
-          if (!isCnRole(role) || parseCnTenant(role) !== getTenantKey(tenant) || seen.has(role)) return false;
+          if (!isCnRole(role) || parseCnTenant(role) !== getTenantKey(tenant) || seen.has(role)
+            || identity.validRoleHosts.get(role) !== host) return false;
           const index = Number(/-CN(\d+)$/.exec(role)?.[1]) - 1;
           if (tenant.cnRoleSpecs) {
             const spec = tenant.cnRoleSpecs[index];
@@ -5467,6 +5558,7 @@ function getActualCnCapacityAudits(data) {
 function getActualBatchWindowAudits(data) {
   if (data.reverse) return [];
   const servers = getPlanServers(data);
+  const identity = getPlanRoleIdentityAudit(data);
   const azNames = getAzNames(data.mode, data.azCount);
   const productionSites = data.mode === "local1az" ? 1 : 2;
   return data.tenantPlans.flatMap(tenant => (tenant.cnWorkloads || [])
@@ -5477,7 +5569,8 @@ function getActualBatchWindowAudits(data) {
       const hostCounts = servers.filter(h => h.azIndex === azIndex).map(host => {
         let count = 0;
         host.roles.forEach(role => {
-          if (parseCnTenant(role) !== getTenantKey(tenant) || seen.has(role)) return;
+          if (parseCnTenant(role) !== getTenantKey(tenant) || seen.has(role)
+            || identity.validRoleHosts.get(role) !== host) return;
           const index = Number(/-CN(\d+)$/.exec(role)?.[1]) - 1;
           const spec = tenant.cnRoleSpecs?.[index];
           if (spec?.key !== "batch" || spec.azIndex !== azIndex) return;
@@ -6068,7 +6161,9 @@ function buildExcelSheets(data) {
   const azNames = getAzNames(data.mode, data.azCount);
   const sizing = data.reverse ? data : data.serverSizing;
   const redlines = getResourceReductionRedlines(data);
+  const identitySummary = getPlanRoleIdentitySummary(data);
   const summaryRows = [
+    ["实例身份完整性", identitySummary.complete ? "通过" : "未通过", identitySummary.text],
     ["设计模块", data.reverse ? "资源约束反推架构" : "业务场景性能测算", "与当前页面选择一致"],
     ["环境类型", environmentLabels[data.environment], data.environment === "production" ? "按生产反亲和和资源水位校验" : "POC 规则不等同生产上线标准"],
     ["部署方式", modeLabels[data.mode], getNetworkLinkText(data.mode)],
@@ -6112,6 +6207,7 @@ function buildExcelSheets(data) {
     widths: [24, 32, 72],
     rowStyle(values, index, defaultStyles) {
       if (values[0] === "红线结论") defaultStyles[1] = redlines.length ? excelStyles.risk : excelStyles.pass;
+      if (values[0] === "实例身份完整性") defaultStyles[1] = identitySummary.complete ? excelStyles.pass : excelStyles.risk;
       return defaultStyles;
     }
   });
