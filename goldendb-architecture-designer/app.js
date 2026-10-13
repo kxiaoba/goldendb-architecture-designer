@@ -977,6 +977,9 @@ function calculateReverse() {
   const capacityViolations = serverPlan.filter((server) => server.resourceAudit && !server.resourceAudit.withinWatermark);
   const dnCenterDistribution = getDnCenterDistribution(serverPlan, mode, azCount);
   if (!cnPlacementAudit.complete || !controlPlaneAudit.complete || capacityViolations.length) resourceState = "不足";
+  // Equal counts cannot establish valid instance identity or placement.
+  if (!getPlanRoleIdentityAudit({ reverse: true, serverPlan, tenantPlans, mode, azCount,
+    gtmBinding, gtmNodes, gtmReplicasPerGroup, managementNodes }).complete) resourceState = "不足";
   if (getDnPlacementIssues({ reverse: true, serverPlan, tenantPlans, mode, azCount }).length) resourceState = "不足";
   const scores = scoreReversePlan({
     environment,
@@ -1344,6 +1347,7 @@ function getPerformanceEvidence(data) {
 
 function getDnHostPressure(data) {
   const servers = getPlanServers(data);
+  const identity = getPlanRoleIdentityAudit(data);
   const capacities = new Map(getDnTakeoverCapacity(data).map(item=>[item.tenant,item]));
   const tenants = new Map(data.tenantPlans.map(t=>[getTenantKey(t),t]));
   const roleCounts = new Map();
@@ -1361,6 +1365,9 @@ function getDnHostPressure(data) {
       }
       const groupKey = `${parsed.tenant}/G${parsed.group}`;
       if (roleCounts.get(role)!==1 || groups.has(groupKey)) {reasons.add("重复角色或同Group副本同机");return;}
+      if (identity.validRoleHosts.get(role.replace(/-Slave$/, "-Slave1")) !== host) {
+        reasons.add("DN实例身份未通过：重复、目标中心、资源池或组件主机类型不符");return;
+      }
       groups.add(groupKey);
       if (!capacity?.evaluated || !(capacity.perReplicaTps>0)) {reasons.add("部分租户缺少可用吞吐标定");return;}
       const targetTps = tenant.dnGroupTps?.[parsed.group-1] ?? capacity.target;
@@ -4823,6 +4830,7 @@ function renderServerPlanRow(server) {
 }
 
 function getReverseConclusion(data) {
+  if (!getPlanRoleIdentityAudit(data).complete) return "实例身份或落位未通过，请先核对缺失、重复、中心与资源池，再评估扩容；当前不可作为可用部署方案";
   if (data.resourceState === "不足") return "需增加服务器或降低分片/副本/隔离要求";
   if (data.environment === "poc") return "可用于 POC 验证，生产需重新按隔离规则评审";
   if (data.resourceState === "临界") return "可做生产初评，建议扩容后上线";
@@ -5604,11 +5612,13 @@ function getActualBatchWindowAudits(data) {
 
 function renderCnPlacementSummary(data) {
   const servers = getPlanServers(data);
+  const identity = getPlanRoleIdentityAudit(data);
   return `<div class="cn-placement-summary">${getActualCnCapacityAudits(data).map(item => `<div class="${item.error ? "cn-placement-error" : item.withinCapacity && item.oneHostWithinCapacity ? "cn-placement-ok" : ""}">${escapeAttr(item.text)}</div>`).join("")}${getActualBatchWindowAudits(data).map(item => `<div class="${item.withinWindow && item.oneHostWithinWindow ? "cn-placement-ok" : "cn-placement-error"}">${escapeAttr(item.text)}</div>`).join("")}${getDnPrimaryDistribution(data).map(item => `<div class="dn-primary-distribution">${escapeAttr(item.text)}</div>`).join("")}${getAzNames(data.mode, data.azCount).map((az, index) => {
-    const hosts = servers.filter((server) => server.az === az && server.roles.some(isCnRole));
+    const hosts = servers.filter((server) => server.azIndex === index && server.roles.some(isCnRole));
     const actual = hosts.reduce((sum, server) => sum + server.roles.filter(isCnRole).length, 0);
+    const valid = hosts.reduce((sum, server) => sum + server.roles.filter(role => isCnRole(role) && identity.validRoleHosts.get(role) === server).length, 0);
     const expected = data.tenantPlans.reduce((sum, tenant) => sum + (tenant.cnByAz?.[index] ?? tenant.cnPerAz), 0);
-    return `<div class="${actual === expected ? "cn-placement-ok" : "cn-placement-error"}"><strong>${escapeAttr(az)}</strong> CN 实例 ${actual}/${expected} · CN 承载服务器 ${hosts.length} 台${actual !== expected ? ` · 未落位 ${Math.max(0, expected - actual)}` : ""}</div>`;
+    return `<div class="${actual === expected && valid === expected ? "cn-placement-ok" : "cn-placement-error"}"><strong>${escapeAttr(az)}</strong> CN 实例 ${actual}/${expected} · 身份有效 ${valid}/${expected} · CN 承载服务器 ${hosts.length} 台（数量统计，水位与性能另行校验）${valid !== expected ? ` · 有效实例缺口 ${Math.max(0, expected - valid)}` : ""}</div>`;
   }).join("")}${data.tenantPlans.map(tenant => `<div><strong>${escapeAttr(displayTenantKey(getTenantKey(tenant), data.tenantPlans))}</strong> · ${dnPrimaryLabels[tenant.primaryStrategy || "balanced"]} · ${tenant.shardCount} 分片 × ${tenant.replicasPerShard} 副本 = ${tenant.dnInstances} DN 实例 · 实际承载 ${servers.filter(server => server.roles.some(role => isDnRole(role) && role.startsWith(`${getTenantKey(tenant)}-`))).length} 台服务器</div>`).join("")}${getDnPlacementIssues(data).map(issue => `<div class="cn-placement-error">${escapeAttr(issue)}</div>`).join("")}</div>`;
 }
 
@@ -6618,6 +6628,12 @@ async function renderElementToPng(target) {
   const staging = document.createElement("div");
   staging.style.cssText = "position:fixed;left:-100000px;top:0;z-index:-1;pointer-events:none;background:#08110f;";
   const layoutClone = target.cloneNode(true);
+  if (latestDesignData && !getPlanRoleIdentityAudit(latestDesignData).complete) {
+    const warning = document.createElement("div");
+    warning.textContent = "实例身份或落位校验未通过：本图仅供排查，不可作为可用部署方案。详见计算过程与风险校验。";
+    warning.style.cssText = "color:#ffb4b4;background:#341c1c;border-left:4px solid #ff6262;padding:12px;margin-bottom:12px;font-size:16px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
+    layoutClone.prepend(warning);
+  }
   layoutClone.style.width = `${preferredWidth}px`;
   layoutClone.style.minWidth = `${preferredWidth}px`;
   layoutClone.style.maxWidth = "none";

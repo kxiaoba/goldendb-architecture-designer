@@ -14,8 +14,8 @@ try{
   const b={...a,tenantId:createTenantIdentity(),name:'second',plannedTxnTps:2500};
   d.tenantPlans=[a,b];Object.assign(d,{dnReferenceTps:2000,dnReferenceCores:16,dnReferenceMemoryGb:64,maxShardTb:2});
   const ka=getTenantKey(a),kb=getTenantKey(b);
-  const host={...d.serverSizing.serverPlan[0],id:'pressure-host',az:'中心A',azIndex:0,roles:[`${ka}-DN-G1-Master`,`${kb}-DN-G1-Master`,`${ka}-CN1`,`${ka}-GTM1`,'管理节点'],spec:{...d.serverSizing.serverPlan[0].spec,cores:64,memoryGb:256,diskTb:10}};
-  host.resourceAudit=getServerResourceAudit(host,{tenantPlans:d.tenantPlans,reserveRatio:.35});
+  const host={...d.serverSizing.serverPlan[0],id:'pressure-host',az:'中心A',azIndex:0,componentKeys:['cn','dn','gtm','management'],roles:[`${ka}-DN-G1-Master`,`${kb}-DN-G1-Master`,`${ka}-CN1`,`${ka}-GTM1`,'管理节点'],spec:{...d.serverSizing.serverPlan[0].spec,cores:64,memoryGb:256,diskTb:10}};
+  host.resourceAudit=getServerResourceAudit(host,{...d,reserveRatio:.35});
   d.serverSizing.serverPlan=[host];const before=JSON.stringify(d);
   let r=getDnHostPressure(d)[0];
   check('cross-tenant-cpu-sum',r.details.map(x=>x.requiredCpu).join(',')==='12,20'&&r.groupCount===2);

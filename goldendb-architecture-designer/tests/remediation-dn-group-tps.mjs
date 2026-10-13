@@ -20,6 +20,8 @@ try {
   check('scope-warning',r.text.includes('跨分片事务不能直接按此拆分'));
   check('excel-linked',JSON.stringify(buildExcelSheets(d)).includes(r.text));
   const key=getTenantKey(t),host=d.serverSizing.serverPlan.find(h=>h.roles.some(isDnRole));
+  // This fixture intentionally places all tested primaries in center A.
+  t.primaryStrategy='centerA';
   host.roles=[`${key}-DN-G1-Master`,`${key}-DN-G2-Master`];
   host.resourceAudit={used:{cpu:32},usable:{cpu:36},withinWatermark:true};d.serverSizing.serverPlan=[host];
   let p=getDnHostPressure(d)[0];
