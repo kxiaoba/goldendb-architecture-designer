@@ -28,7 +28,9 @@ try{
  }));
  const diagnosis=await page.evaluate(()=>{
   resetForm();businessTenantSpecs=Array.from({length:4},(_,i)=>({...businessTenantSpecs[0],tenantId:`TID${900+i}`,name:`租户${i+1}`,deploymentStrategy:i===3?'dedicated':'shared'}));
-  $('gtmBindMode').value='dedicated';render();
+  $('gtmBindMode').value='dedicated';
+  const repack=tryRepackGtmRole;
+  try {tryRepackGtmRole=()=>false;render();} finally {tryRepackGtmRole=repack;}
   const data=latestDesignData,hosts=getPlanServers(data),config={...data,reserveRatio:data.serverSizing.reserveRatio};
   const missing=getGtmRolePlacements(data).filter(p=>!hosts.some(h=>h.roles.includes(p.label)));
   const repairs=missing.map(p=>{

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs';
-const out=path.resolve('outputs/goldendb-remediation-20260906/poc-density/evidence');
+const out=path.resolve(process.env.REMEDIATION_TEST_OUTPUT||'outputs/goldendb-remediation-20260906/poc-density/evidence');
 fs.mkdirSync(out,{recursive:true});
 const browser=await chromium.launch({channel:'chrome',headless:true});
 const page=await browser.newPage({viewport:{width:1600,height:1000}});

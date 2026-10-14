@@ -2708,6 +2708,8 @@ function getPlanRoleIdentityAudit(data) {
 
   const managementByAz = Array(data.azCount).fill(0);
   getPlanServers(data).forEach(server => {
+    const managementCount = server.roles.filter(role => role === "管理节点").length;
+    if (managementCount > 1) issues.push(`${server.id} 管理节点重复落位${managementCount}次：每台物理服务器最多1个管理节点，不能以同机重复抵消其他主机缺失。`);
     server.roles.forEach(role => {
       if (role === "管理节点") {
         if (Number.isInteger(server.azIndex) && server.azIndex >= 0 && server.azIndex < data.azCount) managementByAz[server.azIndex]++;
@@ -2805,7 +2807,36 @@ function placeGtmRolesByPool(servers, config) {
       canPlaceRoleWithinWatermark(server, placement.label, config)
     );
     if (target) target.roles.push(placement.label);
+    else if (allowGroupColocation) tryRepackGtmRole(candidates, placement, config, maxPerServer);
   });
+}
+
+function tryRepackGtmRole(candidates, placement, config, maxPerServer) {
+  const expected = new Map(getGtmRolePlacements(config).map(item => [item.label, item]));
+  const eligible = host => host.azIndex === placement.azIndex && host.tenantPool === placement.resourcePoolKey
+    && host.componentKeys.includes("gtm");
+  const fits = (host, role) => countMatchingRole(host, isGtmRole) < maxPerServer
+    && !host.roles.some(r => getGtmRoleGroupKey(r) === getGtmRoleGroupKey(role))
+    && canPlaceRoleWithinWatermark(host, role, config);
+  let attempts = 0;
+  // One relocation only; trial copies keep unsuccessful searches atomic.
+  for (const source of candidates) {
+    if (!eligible(source)) continue;
+    for (const role of source.roles.filter(isGtmRole)) {
+      const planned = expected.get(role);
+      if (!planned || planned.azIndex !== placement.azIndex || planned.resourcePoolKey !== placement.resourcePoolKey) continue;
+      const trial = {...source, roles: source.roles.filter(r => r !== role)};
+      if (!fits(trial, placement.label)) continue;
+      for (const destination of candidates) {
+        if (++attempts > 2000) return false;
+        if (source === destination || !eligible(destination) || !fits(destination, role)) continue;
+        source.roles = [...trial.roles, placement.label];
+        destination.roles.push(role);
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function getGtmRolePlacements(config) {
@@ -6371,12 +6402,16 @@ function buildExcelSheets(data) {
       !server.spec || !audit || audit.issues?.length ? `${state.status}：${state.detail}` : `CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / 磁盘 ${audit.diskPercent}%；资源预留 ${round((data.reverse ? data.reserveRatio : data.serverSizing.reserveRatio) * 100)}%`
     ]);
   });
-  (sizing.gtmGroupPlacementAudit?.groups || []).forEach((group) => riskRows.push([
-    "GTM副本",
-    group.actual === group.expected ? "通过" : "高风险",
-    displayRole(group.groupKey, data.tenantPlans),
-    `实际 ${group.actual} / 应有 ${group.expected}；同 Group 副本必须跨物理服务器`
-  ]));
+  const validGtmRoles = [...getPlanRoleIdentityAudit(data).validRoleHosts.keys()].filter(isGtmRole);
+  (sizing.gtmGroupPlacementAudit?.groups || []).forEach((group) => {
+    const valid = validGtmRoles.filter(role => getGtmRoleGroupKey(role) === group.groupKey).length;
+    riskRows.push([
+      "GTM副本",
+      group.actual === group.expected && valid === group.expected ? "通过" : "高风险",
+      displayRole(group.groupKey, data.tenantPlans),
+      `实际 ${group.actual} / 应有 ${group.expected}；身份有效 ${valid} / ${group.expected}；仅核对数量与身份，水位另行校验；同 Group 副本必须跨物理服务器`
+    ]);
+  });
   const riskSheet = buildExcelTableSheet({
     name: "风险水位",
     title: "生产红线、资源水位与副本完整性",
