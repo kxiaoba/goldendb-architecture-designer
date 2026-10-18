@@ -11,7 +11,7 @@ try{
  await page.goto('file://'+path.resolve('goldendb-architecture-designer/index.html'));
  results.push(...await page.evaluate(()=>{
   const r=[],c=(name,pass)=>r.push({name,pass}),d=latestDesignData;
-  const config={tenantPlans:d.tenantPlans,reserveRatio:.35};
+  const config={tenantPlans:d.tenantPlans,reserveRatio:.35,managementNodes:d.managementNodes};
   const host={spec:{cores:256,memoryGb:2048,diskTb:100},roles:[]};
   const role=`${getTenantKey(d.tenantPlans[0])}-CN1`;
   c('missing-spec-rejected',getServerResourceAudit({roles:[]},config)===null&&!canPlaceRoleWithinWatermark({roles:[]},role,config));
@@ -37,7 +37,7 @@ try{
    batchCoreTps:50,batchCpuLimit:.7,batchGrowth:1,batchCount:0,batchSizingMode:'manual',batchCores:16,batchMemoryGb:64});render();
  });
  const before=await page.evaluate(()=>JSON.stringify(latestDesignData));
- check('advanced-initially-closed',await page.locator('.workload-options').evaluateAll(els=>els.length===2&&els.every(e=>!e.open)));
+ check('advanced-initially-closed',await page.locator('[data-workload-options=online], [data-workload-options=batch]').evaluateAll(els=>els.length===2&&els.every(e=>!e.open)));
  await page.locator('[data-workload-options=batch] summary').click();
  check('expand-no-model-change',await page.evaluate(before=>JSON.stringify(latestDesignData)===before,before));
  await page.locator('[data-key=batchSizingMode]').selectOption('auto');
@@ -48,9 +48,11 @@ try{
   const [o,b]=latestDesignData.tenantPlans[0].cnWorkloads;return o.target===800&&b.target===375;
  }));
  for(const mode of ['qps','tps','sqlWindow','work']){
+  await page.locator('[data-key=batchInputBasis]').selectOption(['qps','tps'].includes(mode)?'peak':'volume');
   await page.locator('[data-key=batchRateMode]').selectOption(mode);
   check('explanation-'+mode,await page.locator('.workload-help').allTextContents().then(text=>text.join(' ').includes(mode==='sqlWindow'?'平均 QPS':mode==='work'?'相同业务单位':mode==='tps'?'不再除以':'跑批 TPS =')));
  }
+ await page.locator('[data-key=batchInputBasis]').selectOption('peak');
  await page.locator('[data-key=batchRateMode]').selectOption('qps');
  check('formula-explained',await page.locator('#formulaOutput').textContent().then(s=>s.includes('每个生产AZ独立满足完整目标')&&s.includes('整实例实测吞吐')));
  for(const width of [390,875,1600]){
