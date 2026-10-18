@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {chromium} from '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs';
-const out=path.resolve('outputs/goldendb-spec-remediation-20260915/s01b1');
+const out=path.resolve(process.env.REMEDIATION_TEST_OUTPUT||'outputs/goldendb-spec-remediation-20260915/s01b1');
 fs.mkdirSync(out,{recursive:true});
 const browser=await chromium.launch({channel:'chrome',headless:true});
 const page=await browser.newPage();
