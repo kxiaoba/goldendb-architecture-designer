@@ -15,7 +15,7 @@
 | S01b3b2a | 单Group/单DN副本接管容量、最终规格、标定水位及物理缺口关联 | 已实施，147项通过，见remediation-dn-takeover.md；只是必要条件检查 |
 | S01b3b2b1 | DN共享宿主机CPU接管压力上界，保留非DN额度及单副本红线 | 已实施，146项通过，见remediation-dn-host-pressure.md |
 | S01b3b2b2/c | Group热点、IO/网络与DN/GTM实测瓶颈、同步条件与容灾目标 | 热点/数据倾斜、逐Group容量和规划TPS已实施并发布；IO网络、联合瓶颈及同步证据仍待办，见各专项与总进度 |
-| S02 | RAID10/5/0及盘数合法性、三年增长、日志/临时空间、独立磁盘水位和80%红线 | V3a业务净容量部分已验收；反推需求、三年规划和故障空间仍待V3b，见remediation-storage-capacity.md |
+| S02 | RAID10/5/0及盘数合法性、三年增长、日志/临时空间、独立磁盘水位和80%红线 | V3a至V3b3a及V3b3b1每主机恢复工作区已验收；整机失效副本重建空间待V3b3b2，见remediation-recovery-workspace.md |
 | S03 | 三行业生产/POC、多租户、两模块、混部、主中心切换、PNG/Excel联调及最终报告 | 未实施 |
 
 ## 必须保持的规则

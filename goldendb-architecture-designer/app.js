@@ -323,6 +323,14 @@ function getPlanningInputIssues(module = $("designModule").value) {
       ? { cnPerAz: [1, true], cnCores: [1, true], cnMemoryGb: [1, true], dnCores: [1, true], dnMemoryGb: [1, true] }
       : { qps: [1, true], dataTb: [0.1, false] };
     if (module === "reverse" && tenant.type !== "centralized") rules.shardCount = [1, true];
+    if (module === "reverse") {
+      const storageMode = tenant.storageDemandMode ?? "unknown";
+      if (!["unknown", "explicit"].includes(storageMode)) issues.push(`租户 ${index + 1} 数据需求口径无效`);
+      if (storageMode === "explicit") {
+        try { readReverseDataTime(tenant); }
+        catch(error) { if (!(error instanceof PlanningInputError)) throw error; issues.push(error.message); }
+      }
+    }
     if (module === "business" && tenant.cnPerAzManual && tenant.workloadMode !== "split") rules.cnPerAz = [1, true];
     if (module === "business" && tenant.minShardsManual && $("dbShape").value === "distributed" && tenant.type === "distributed") rules.minShards = [1, true];
     rules.replicaCount = [1, true, 7];
@@ -768,6 +776,9 @@ function calculateReverse() {
   const cpuCores = numberValue("reverseCpuCores");
   const memoryGb = numberValue("reverseMemoryGb");
   const diskTb = numberValue("reverseDiskTb");
+  const storage = readStorageProfile(field => $("reverseStorage" + field).value);
+  const dataDiskCount = storage.mode === "net" ? workloadNumber($("reverseStorageDiskCount").value, "数据盘总数量", 1, true, 2000) : 1;
+  const dataDiskTb = storage.mode === "net" ? workloadNumber($("reverseStorageDiskTb").value, "单盘容量TB", Number.MIN_VALUE) : diskTb;
   const reserveRatio = Math.min(0.8, Math.max(0, numberValue("reverseReserveRatio")));
   const maxDnPerServer = getPocInstanceLimit("reverse", "dn", integerValue("reverseMaxDnPerServer", 1));
   const maxCnPerServer = getPocInstanceLimit("reverse", "cn", integerValue("reverseMaxCnPerServer", 1));
@@ -828,11 +839,13 @@ function calculateReverse() {
     memoryGb,
     network: "按客户资源池配置",
     systemDisk: "系统盘与数据盘隔离",
-    dataDiskTb: diskTb,
-    dataDiskCount: 1,
+    dataDiskTb,
+    dataDiskCount,
     diskTb,
+    storage,
     maxInstances: key === "cn" ? maxCnPerServer : key === "dn" ? maxDnPerServer : key === "gtm" ? 2 : 1
   }]));
+  getDiskCapacity(reverseComponentSpecs.dn, reserveRatio);
   const resourceReduction = getResourceReductionConfig("reverse", environment, maxDnPerServer);
   const requestedComponentLayout = resourceReduction.requestedComponentLayout;
   const requestedGtmAffinity = resourceReduction.requestedGtmAffinity;
@@ -860,7 +873,7 @@ function calculateReverse() {
       instances: actualDnInstances,
       cpuCores: tenantPlans.reduce((sum, tenant) => sum + tenant.dnCpuDemand, 0),
       memoryGb: tenantPlans.reduce((sum, tenant) => sum + tenant.dnMemoryDemand, 0),
-      diskTb: 0,
+      diskTb: tenantPlans.reduce((sum, tenant) => sum + tenant.futureDataTb * tenant.replicasPerShard, 0),
       ...dnPlacementFloors
     },
     gtm: {
@@ -993,7 +1006,9 @@ function calculateReverse() {
     replicasPerShard,
     serverPlan
   });
-  const futureDataTb = Math.max(1, shardCount * 2);
+  const futureDataTb = tenantPlans.reduce((sum, tenant) => sum + tenant.futureDataTb, 0);
+  const storedDataTb = tenantPlans.reduce((sum, tenant) => sum + tenant.futureDataTb * tenant.replicasPerShard, 0);
+  if (![futureDataTb, storedDataTb].every(Number.isFinite)) throw new PlanningInputError("反推规划数据总量或副本容量超出数值范围");
 
   return {
     reverse: true,
@@ -1061,6 +1076,8 @@ function calculateReverse() {
     scores,
     serverPlan,
     futureDataTb,
+    storedDataTb,
+    storageDemandComplete: tenantPlans.every(tenant => tenant.storageDemandKnown),
     maxShardTb: 2,
     minShards: 2
   };
@@ -1544,7 +1561,7 @@ function buildReversePoolDemands(pool, config) {
       instances: totalDn,
       cpuCores: tenantPlans.reduce((sum, tenant) => sum + tenant.dnCpuDemand, 0),
       memoryGb: tenantPlans.reduce((sum, tenant) => sum + tenant.dnMemoryDemand, 0),
-      diskTb: 0,
+      diskTb: tenantPlans.reduce((sum, tenant) => sum + tenant.futureDataTb * tenant.replicasPerShard, 0),
       ...dnFloors
     },
     gtm: {
@@ -1898,16 +1915,26 @@ function getDiskCapacity(spec, reserveRatio = 0) {
   const indexTb=workloadNumber(p.indexTb,"每主机额外索引预留TB",0);
   const tempTb=workloadNumber(p.tempTb,"每主机临时空间预留TB",0);
   const watermark=workloadNumber(p.watermark,"独立磁盘水位",.01,false,1);
-  const arrayTb=capacityDisks*size,fsTb=arrayTb*(1-fsRatio),reservedTb=logTb+indexTb+tempTb;
+  const recoveryMode=p.recoveryMode ?? "unknown";
+  if(!["unknown","none","included","extra"].includes(recoveryMode)) throw new PlanningInputError("恢复工作区预算口径无效");
+  const recoveryTb=["included","extra"].includes(recoveryMode)?workloadNumber(p.recoveryTb,"每主机恢复工作区TB",Number.MIN_VALUE):0;
+  const recoverySource=recoveryMode==="unknown"?"":String(p.recoverySource??"").trim();
+  if(recoveryMode!=="unknown") {
+    const error=xmlTextError(recoverySource,"恢复工作区预算依据");
+    if(error||!recoverySource) throw new PlanningInputError(error||"请填写恢复工作区预算依据；文字仅为用户声明，非实测已核验");
+  }
+  if(recoveryMode==="included"&&recoveryTb>tempTb) throw new PlanningInputError("已含恢复工作区不能超过每主机临时空间预算；不得重复扣减");
+  const recoveryExtraTb=recoveryMode==="extra"?recoveryTb:0;
+  const arrayTb=capacityDisks*size,fsTb=arrayTb*(1-fsRatio),reservedTb=logTb+indexTb+tempTb+recoveryExtraTb;
   const dataTb=fsTb-reservedTb,usableTb=dataTb*watermark;
   if(![arrayTb,fsTb,reservedTb,dataTb,usableTb].every(Number.isFinite)||!(usableTb>0)) throw new PlanningInputError("RAID和空间预算扣除后无正可用数据容量，请复核磁盘与预留；不能靠增加同规格主机容纳过大的单实例");
-  return {mode:"net",raid:p.raid,rawTb,disks,spare,active,arrayTb,fsRatio,fsTb,logTb,indexTb,tempTb,reservedTb,dataTb,watermark,usableTb};
+  return {mode:"net",raid:p.raid,rawTb,disks,spare,active,arrayTb,fsRatio,fsTb,logTb,indexTb,tempTb,reservedTb,dataTb,watermark,usableTb,recoveryMode,recoveryTb,recoverySource,recoveryExtraTb};
 }
 
 function formatDiskCapacity(spec, reserveRatio) {
   const d=getDiskCapacity(spec,reserveRatio);
   if(d.mode==="legacy") return `旧磁盘口径：原始 ${round(d.rawTb)}TB × ${round(d.watermark*100)}% = ${round(d.usableTb)}TB；RAID、日志等净空间未评估。`;
-  return `净磁盘口径：原始 ${round(d.rawTb)}TB，${d.active}有效盘/${d.spare}热备，${d.raid.toUpperCase()}阵列 ${round(d.arrayTb)}TB；文件系统预留 ${round(d.fsRatio*100)}% 后 ${round(d.fsTb)}TB，减日志 ${round(d.logTb)}/额外索引 ${round(d.indexTb)}/临时 ${round(d.tempTb)}TB，数据空间 ${round(d.dataTb)}TB × 独立水位 ${round(d.watermark*100)}% = ${round(d.usableTb)}TB。不再扣统一磁盘预留；预算为每主机，不能与数据量重复计入，未验证实际空间开销。`;
+  return `净磁盘口径：原始 ${round(d.rawTb)}TB，${d.active}有效盘/${d.spare}热备，${d.raid.toUpperCase()}阵列 ${round(d.arrayTb)}TB；文件系统预留 ${round(d.fsRatio*100)}% 后 ${round(d.fsTb)}TB，减日志 ${round(d.logTb)}/额外索引 ${round(d.indexTb)}/临时 ${round(d.tempTb)}TB${d.recoveryExtraTb?`/额外恢复工作区 ${round(d.recoveryExtraTb)}TB`:""}，数据空间 ${round(d.dataTb)}TB × 独立水位 ${round(d.watermark*100)}% = ${round(d.usableTb)}TB。不再扣统一磁盘预留；预算为每主机，不能与数据量重复计入，未验证实际空间开销。`;
 }
 
 function formatHostDiskCapacity(server) {
@@ -1917,8 +1944,16 @@ function formatHostDiskCapacity(server) {
 }
 
 function getStorageCapacityAudits(data) {
-  if(data.reverse) return [{component:"资源反推磁盘",status:"旧口径 / 需求未评估",error:false,
-    text:`${formatDiskCapacity(data.componentSpecs.dn,data.reserveRatio)} 反推尚未提供业务数据量与逐Group空间需求，当前磁盘用量不能代表实际承载已通过；净容量及数据需求联动留后续批次。`}];
+  if(data.reverse) {
+    const known=data.tenantPlans.filter(tenant=>tenant.storageDemandKnown);
+    const d=getDiskCapacity(data.componentSpecs.dn,data.reserveRatio);
+    const error=data.environment==="production"&&d.mode==="net"&&(d.raid==="raid0"||d.watermark>.8);
+    const policy=`${d.raid==="raid0"?" RAID0/单盘无磁盘冗余，不能判定满足生产磁盘保护要求。":""}${d.mode==="net"&&d.watermark>.8?" 独立磁盘水位高于本工具80%空间预算策略。":""}`;
+    const details=data.tenantPlans.map(tenant=>`${tenant.name}：${tenant.storageDemandKnown?`单份 ${round(tenant.futureDataTb)}TB / ${tenant.shardCount} Group，${tenant.dnGroupDataTb?"按逐Group录入":"按均匀假设"}，${tenant.replicasPerShard}副本共 ${round(tenant.futureDataTb*tenant.replicasPerShard)}TB`:"数据需求未评估"}`).join("；");
+    const status=error?"生产磁盘策略未通过":known.length===data.tenantPlans.length?(d.mode==="net"?"净容量工程初算 / 已录入需求":"已录入需求 / 净容量未评估"):(d.mode==="net"?"净容量初算 / 需求未评估":"旧口径 / 需求未评估");
+    return [{component:"资源反推磁盘",status,error,
+      text:`${formatDiskCapacity(data.componentSpecs.dn,data.reserveRatio)}${policy} ${details}。已录入单份合计 ${round(data.futureDataTb)}TB，副本落盘 ${round(data.storedDataTb)}TB；${known.length===data.tenantPlans.length?`仅校验已录入数据与${d.mode==="net"?"净磁盘":"旧磁盘"}空间预算，不代表生产承载已通过`:"尚未提供全部业务数据量，当前磁盘用量只计已录入部分，不能代表实际承载已通过"}；当前量只增长一次，已含增长的规划量不重复增长。故障空间预算留后续批次。`}];
+  }
   const specs=data.componentSpecs,reserve=data.serverSizing.reserveRatio;
   return componentServerDefinitions.map(({key,label})=>{
     const d=getDiskCapacity(specs[key],reserve);
@@ -1929,7 +1964,36 @@ function getStorageCapacityAudits(data) {
 }
 
 function renderStorageCapacity(data) {
-  return `<div class="storage-capacity-summary"><h4>磁盘容量核对</h4>${getStorageCapacityAudits(data).map(item=>`<p class="${item.error?"cn-placement-error":""}">${escapeAttr(item.text)}</p>`).join("")}</div>`;
+  return `<div class="storage-capacity-summary"><h4>磁盘容量核对</h4>${getStorageCapacityAudits(data).map(item=>`<p class="${item.error?"cn-placement-error":""}">${escapeAttr(item.text)}</p>`).join("")}<h4>恢复工作区预算</h4>${getRecoveryWorkspaceAudits(data).map(item=>`<p>${escapeAttr(item.text)}</p>`).join("")}<h4>数据时点与三年参考目标</h4>${getDataHorizonAudits(data).map(item=>`<p>${escapeAttr(item.text)}</p>`).join("")}</div>`;
+}
+
+function getRecoveryWorkspaceAudits(data) {
+  const entries=data.reverse?[{key:"dn",label:"反推同构主机"}]:componentServerDefinitions;
+  return entries.map(({key,label})=>{
+    const d=getDiskCapacity(data.componentSpecs[key],data.reverse?data.reserveRatio:data.serverSizing.reserveRatio);
+    if(d.mode!=="net"||d.recoveryMode==="unknown") return {component:label,status:"恢复工作区未评估",text:`${label}：恢复工作区预算未评估；未从RAID热备或数据库副本推定工作区需求。整机失效后的副本迁移/重建空间、目标落位和RPO/RTO未评估。`};
+    const description=d.recoveryMode==="none"?"声明无需额外工作区，新增扣减0TB":d.recoveryMode==="included"?`声明 ${round(d.recoveryTb)}TB 已含在临时预算 ${round(d.tempTb)}TB内，不重复扣减`:`每主机独立额外 ${round(d.recoveryTb)}TB，在文件系统后、水位前扣一次`;
+    return {component:label,status:"工作区预算初算 / 恢复策略未验证",text:`${label}：${description}；净可用 ${round(d.usableTb)}TB。依据：${d.recoverySource}（用户声明，未核验）。仅计每主机工作区，不验证整机失效后的副本重建目标、并发开销、IO、恢复时长或RPO/RTO；不等于恢复可行。`};
+  });
+}
+
+function getDataHorizonAudits(data) {
+  return data.tenantPlans.map(tenant=>{
+    const name=tenant.name;
+    if(data.reverse && !tenant.storageDemandKnown) return {component:name,status:"未评估",text:`${name}：数据需求未提供，三年覆盖未评估。`};
+    const current=!data.reverse || tenant.storageDataBasis==="current";
+    const years=data.reverse?tenant.dataHorizonYears:data.years;
+    const prefix=`${name}：${current?"当前量+增长":"已含增长的规划量"}，单份规划 ${round(tenant.futureDataTb)}TB`;
+    if(years==null) return {component:name,status:"年限未评估",text:`${prefix}；未声明覆盖年限，三年覆盖未评估，不从规划量反推当前量或增长，不重复增长。`};
+    const covered=years>=3;
+    const suffix=`${years}年口径${covered?"达到":"短于"}本工具三年参考目标；不自动改年限、分片或库存，不代表容量/性能认证。`;
+    if(!current) return {component:name,status:covered?"年限声明达到参考目标":"年限短于参考目标",text:`${prefix}；${suffix}未提供当前量/增长，三年数据差额未评估；规划量不再乘增长。`};
+    const growth=data.reverse?tenant.dataGrowthFactor:data.growthFactor;
+    const target=tenant.dataTb*Math.pow(growth,3);
+    if(!Number.isFinite(target)||target>Number.MAX_SAFE_INTEGER) return {component:name,status:"三年外推未评估",text:`${prefix}；${suffix}三年参考外推超出本工具数值范围，未改动当前有效方案。`};
+    return {component:name,status:covered?"年限达到参考目标":"年限短于参考目标",targetTb:target,gapTb:Math.max(0,target-tenant.futureDataTb),
+      text:`${prefix} = 当前 ${round(tenant.dataTb)}TB × POWER(${growth}, ${years})；${suffix}三年参考单份 ${round(target)}TB，较当前方案还差 ${round(Math.max(0,target-tenant.futureDataTb))}TB（不含副本）；${growth===1?"增长倍数1是输入假设，未验证三年需求。":"增长为用户假设，非实测预测。"}`};
+  });
 }
 
 function calculateComponentRequirement(demand, spec, reserveRatio) {
@@ -2318,10 +2382,16 @@ function parseDnGroupData(raw, tenant) {
     throw new PlanningInputError(`逐Group数据必须包含 ${tenant.shardCount} 个非负有限数字，按G1至G${tenant.shardCount}顺序。`);
   }
   const total = values.reduce((sum,value)=>sum+value,0);
-  if (!Number.isFinite(total) || Math.abs(total-tenant.dataTb)>Math.max(1e-9,tenant.dataTb*1e-9)) {
-    throw new PlanningInputError(`逐Group当前数据合计必须等于租户当前数据量 ${tenant.dataTb}TB，不能填写副本总容量或增长后容量。`);
+  if (tenant.dataTb===0 && values.some(value=>value!==0)) {
+    throw new PlanningInputError("单份数据明确为0TB时，各Group数据也必须均为0，不能以求和容差计入正数据量。");
   }
-  const planned = values.map(value => value * (tenant.futureDataTb/tenant.dataTb));
+  if (!Number.isFinite(total) || Math.abs(total-tenant.dataTb)>Math.max(1e-9,tenant.dataTb*1e-9)) {
+    throw new PlanningInputError(tenant.storageDemandKnown && tenant.storageDataBasis!=="current"
+      ? `逐Group规划数据合计必须等于租户单份规划数据量 ${tenant.dataTb}TB，不能填写副本总容量。`
+      : `逐Group当前数据合计必须等于租户当前数据量 ${tenant.dataTb}TB，不能填写副本总容量或增长后容量。`);
+  }
+  const planned = tenant.storageDemandKnown && tenant.storageDataBasis!=="current" ? values
+    : values.map(value => value * (tenant.dataTb===0?1:tenant.futureDataTb/tenant.dataTb));
   if (!planned.every(Number.isFinite)) throw new PlanningInputError("逐Group增长后容量超出数值范围。");
   return planned;
 }
@@ -2352,7 +2422,7 @@ function getRoleResourceDemand(role, tenantPlans, config = null) {
     if (!canonical || !Number.isSafeInteger(tenant.shardCount) || dnRole.group > tenant.shardCount
       || !Number.isSafeInteger(tenant.replicasPerShard) || !Number.isSafeInteger(replica)
       || replica >= tenant.replicasPerShard) return unknown;
-    return { cpu: tenant.dnCores, memory: tenant.dnMemoryGb, disk: getDnGroupDataTb(tenant, dnRole.group) };
+    return { cpu: tenant.dnCores, memory: tenant.dnMemoryGb, disk: getDnGroupDataTb(tenant, dnRole.group), diskUnknown: tenant.storageDemandKnown === false };
   }
   if (isGtmRole(role)) return config && getGtmRolePlacements(config).some(item => item.label === role)
     ? { cpu: 4, memory: 8, disk: 0 } : unknown;
@@ -2386,9 +2456,14 @@ function getServerResourceAudit(server, config, extraDemand = null) {
     }
   }
   const usable = getUsableServerResources(server.spec,config.reserveRatio);
+  const diskDemandUnknown = server.roles.some(role => {
+    const dn = parseDnPlacementRole(role);
+    return dn && config.tenantPlans.some(tenant => getTenantKey(tenant) === dn.tenant && tenant.storageDemandKnown === false);
+  });
   return {
     used,
     usable,
+    diskDemandUnknown,
     cpuPercent: Math.round((used.cpu / server.spec.cores) * 100),
     memoryPercent: Math.round((used.memory / server.spec.memoryGb) * 100),
     diskPercent: Math.round((used.disk / getDiskCapacity(server.spec,config.reserveRatio).dataTb) * 100),
@@ -2408,7 +2483,12 @@ function getServerAuditStatus(server) {
   if (!server.spec || !audit) return {status:"未评估", detail:"缺少服务器规格或资源审计，不能确认可用容量"};
   if (audit.issues?.length) return {status:"未通过", detail:audit.issues.join("；")};
   if (audit.withinWatermark !== true) return {status:"未通过", detail:"资源水位未通过，请核对单机容量及组件需求"};
+  if (audit.diskDemandUnknown) return {status:"部分未评估", detail:"已录入资源水位未超限，但存在未提供数据需求的DN，不能确认完整磁盘承载"};
   return {status:"通过", detail:"资源水位算式通过，非性能或高可用认证"};
+}
+
+function formatServerDiskLoad(server) {
+  return server.resourceAudit?.diskDemandUnknown ? "未评估（仅计已录入部分）" : `${server.diskLoad}%`;
 }
 
 function getInstanceFitIssues(data) {
@@ -3461,6 +3541,23 @@ function buildBusinessTenantPlans(data) {
   return plans;
 }
 
+function readReverseDataTime(spec) {
+  const basis=spec.dataTimeBasis ?? "planned";
+  if(!["planned","current"].includes(basis)) throw new PlanningInputError("反推数据时点口径无效");
+  if(basis==="planned") {
+    const dataTb=workloadNumber(spec.plannedDataTb,"反推单份规划数据TB",0);
+    const raw=spec.plannedDataYears;
+    const years=raw==null||String(raw).trim()===""?null:workloadNumber(raw,"规划量覆盖年限",0,true,100);
+    return {storageDataBasis:basis,dataTb,futureDataTb:dataTb,dataHorizonYears:years,dataGrowthFactor:null};
+  }
+  const dataTb=workloadNumber(spec.currentDataTb ?? 1,"反推单份当前数据TB",0);
+  const growth=workloadNumber(spec.dataGrowthFactor ?? 1,"数据年增长倍数",1);
+  const years=workloadNumber(spec.dataYears ?? 3,"数据规划年限",0,true,100);
+  const power=Math.pow(growth,years),futureDataTb=dataTb*power;
+  if(!Number.isFinite(power)||!Number.isFinite(futureDataTb)||futureDataTb>Number.MAX_SAFE_INTEGER) throw new PlanningInputError("数据增长后容量超出本工具数值范围");
+  return {storageDataBasis:basis,dataTb,futureDataTb,dataHorizonYears:years,dataGrowthFactor:growth};
+}
+
 function buildReverseTenantPlans(data) {
   ensureTenantIdentities(data.specs);
   const plans = data.specs.map((spec, index) => {
@@ -3481,6 +3578,13 @@ function buildReverseTenantPlans(data) {
     const dnCores = Math.max(1, Number(spec.dnCores) || 16);
     const dnMemoryGb = Math.max(1, Number(spec.dnMemoryGb) || 64);
     const totalTenantCn = cnPerAz * data.azCount;
+    const demandMode = spec.storageDemandMode ?? "unknown";
+    if (!["unknown", "explicit"].includes(demandMode)) throw new PlanningInputError("反推数据需求口径无效");
+    const storageDemandKnown = demandMode === "explicit";
+    const time=storageDemandKnown?readReverseDataTime(spec):{dataTb:0,futureDataTb:0,dataHorizonYears:null};
+    if (!Number.isFinite(time.futureDataTb * replicasPerShard)) throw new PlanningInputError("反推数据副本容量超出数值范围");
+    const dnGroupDataTb = storageDemandKnown
+      ? parseDnGroupData(time.storageDataBasis==="current"?spec.currentDnGroupDataInput:spec.dnGroupDataInput, {...time,shardCount,storageDemandKnown}) : null;
 
     return {
       tenantNo,
@@ -3492,8 +3596,9 @@ function buildReverseTenantPlans(data) {
       isDistributed,
       type: isDistributed ? "分布式租户" : "集中式/单分片租户",
       qps: 0,
-      dataTb: 0,
-      futureDataTb: 0,
+      ...time,
+      storageDemandKnown,
+      dnGroupDataTb,
       requestedReplicas,
       cnPerAz,
       totalCn: totalTenantCn,
@@ -3514,6 +3619,9 @@ function buildReverseTenantPlans(data) {
       gtmGroupText: "待绑定"
     };
   });
+  if (!Number.isFinite(plans.reduce((sum, tenant) => sum + tenant.futureDataTb * tenant.replicasPerShard, 0))) {
+    throw new PlanningInputError("反推租户副本数据合计超出数值范围");
+  }
   assertPlanningScale(plans.reduce((sum, tenant) => sum + tenant.totalCn + tenant.dnInstances, 0), "instances");
   return plans;
 }
@@ -3863,7 +3971,9 @@ function assessLayoutPlacement(data) {
   }
   return {status:fit.length?"单实例不适配":issues.length?"当前装箱未通过":"落位检查通过",
     feasibleServers:issues.length?null:servers.length, testedServers:servers.length,
-    reason:fit[0]?.text || issues[0] || "实例身份、中心/资源池、反亲和、密度及资源水位通过；未验证性能、故障接管或生产可用性。"};
+    reason:fit[0]?.text || issues[0] || (data.reverse && data.tenantPlans.some(tenant=>tenant.storageDemandKnown===false)
+      ? "实例身份、中心/资源池、反亲和及密度通过；资源水位只检查已录入部分，部分租户数据需求未评估，不能确认完整磁盘承载；未验证性能、故障接管或生产可用性。"
+      : "实例身份、中心/资源池、反亲和、密度及资源水位通过；未验证性能、故障接管或生产可用性。")};
 }
 
 function getLayoutFeasibilityAudits(data) {
@@ -3909,6 +4019,7 @@ function render(options = {}) {
   syncParameterPanels();
   syncDnCalibrationFields();
   syncBusinessStorageFields();
+  syncReverseStorageFields();
   const issues = getPlanningInputIssues();
   if (!issues.length && $("designModule").value === "business") {
     try { syncBusinessTenantAutoValues(); }
@@ -4042,7 +4153,7 @@ function renderComponentMachineEditor() {
   }).join("");
 }
 
-const storageProfileDefaults = {Mode:"legacy",Raid:"unknown",SpareDisks:0,FsReserveRatio:0,LogTb:0,IndexTb:0,TempTb:0,Watermark:.8};
+const storageProfileDefaults = {Mode:"legacy",Raid:"unknown",SpareDisks:0,FsReserveRatio:0,LogTb:0,IndexTb:0,TempTb:0,Watermark:.8,RecoveryMode:"unknown",RecoveryTb:0,RecoverySource:""};
 function storageInputId(key,field) { return `businessStorage${key[0].toUpperCase()+key.slice(1)}${field}`; }
 
 function initializeStorageControls() {
@@ -4053,7 +4164,7 @@ function initializeStorageControls() {
   $("customerServerConfig").insertAdjacentHTML("beforebegin",`<div id="businessStorageEditor"><div class="section-label">磁盘容量口径</div>${componentServerDefinitions.map(({key,label})=>`<details class="workload-options" data-business-storage="${key}"><summary>${label} 数据盘</summary>
     <label class="field"><span>容量口径</span><select id="${storageInputId(key,"Mode")}"><option value="legacy">旧口径（原始盘与统一预留）</option><option value="net">净容量（RAID 与空间预算）</option></select></label>
     <div class="grid-two" data-storage-fields="${key}"><label class="field"><span>数据盘 RAID</span><select id="${storageInputId(key,"Raid")}">${options.map(([v,l])=>`<option value="${v}">${l}</option>`).join("")}</select></label>
-    ${numeric.map(([field,label,min,max,step])=>`<label class="field"><span>${label}</span><input id="${storageInputId(key,field)}" type="number" min="${min}" ${max===""?"":`max="${max}"`} step="${step}" value="${storageProfileDefaults[field]}"></label>`).join("")}</div></details>`).join("")}</div>`);
+    ${numeric.map(([field,label,min,max,step])=>`<label class="field"><span>${label}</span><input id="${storageInputId(key,field)}" type="number" min="${min}" ${max===""?"":`max="${max}"`} step="${step}" value="${storageProfileDefaults[field]}"></label>`).join("")}${renderRecoveryWorkspaceFields(storageInputId(key,""))}</div></details>`).join("")}</div>`);
   componentServerDefinitions.forEach(({key})=>Object.entries(storageProfileDefaults).forEach(([field,value])=>{
     const id=storageInputId(key,field);inputs.push(id);defaults[id]=value;
   }));
@@ -4067,18 +4178,56 @@ function syncBusinessStorageFields() {
     mode.disabled=inactive;
     document.querySelector(`[data-storage-fields="${key}"]`).hidden=inactive||mode.value!=="net";
     for(const field of Object.keys(storageProfileDefaults).filter(f=>f!=="Mode")) $(storageInputId(key,field)).disabled=inactive||mode.value!=="net";
+    syncRecoveryWorkspaceFields(storageInputId(key,""),!inactive&&mode.value==="net");
   });
 }
 
 function readBusinessStorageProfile(key) {
-  const value=field=>$(storageInputId(key,field)).value;
+  return readStorageProfile(field=>$(storageInputId(key,field)).value);
+}
+
+function readStorageProfile(value) {
   const mode=value("Mode");
   if(!["legacy","net"].includes(mode)) throw new PlanningInputError("磁盘容量口径无效");
   if(mode==="legacy") return {mode};
-  return {mode,raid:value("Raid"),spareDisks:workloadNumber(value("SpareDisks"),"独立热备盘数",0,true,2000),
+  const recoveryMode=value("RecoveryMode");
+  return {mode,recoveryMode,recoveryTb:["included","extra"].includes(recoveryMode)?workloadNumber(value("RecoveryTb"),"每主机恢复工作区TB",Number.MIN_VALUE):0,
+    recoverySource:recoveryMode==="unknown"?"":String(value("RecoverySource")).trim(),raid:value("Raid"),spareDisks:workloadNumber(value("SpareDisks"),"独立热备盘数",0,true,2000),
     fsReserveRatio:workloadNumber(value("FsReserveRatio"),"文件系统预留比例",0,false,.8),
     logTb:workloadNumber(value("LogTb"),"每主机日志预留TB",0),indexTb:workloadNumber(value("IndexTb"),"每主机额外索引预留TB",0),
     tempTb:workloadNumber(value("TempTb"),"每主机临时空间预留TB",0),watermark:workloadNumber(value("Watermark"),"独立磁盘水位",.01,false,1)};
+}
+
+function initializeReverseStorageControls() {
+  const numeric=[["DiskCount","数据盘总数（含热备）",1,2000,1,4],["DiskTb","单盘容量 TB",.01,"","any",2],
+    ["SpareDisks","独立热备盘数",0,2000,1,0],["FsReserveRatio","文件系统预留比例",0,.8,.01,0],
+    ["LogTb","每主机日志预留 TB",0,"","any",0],["IndexTb","每主机额外索引预留 TB",0,"","any",0],
+    ["TempTb","每主机临时空间预留 TB",0,"","any",0],["Watermark","独立磁盘水位（0至1）",.01,1,.01,.8]];
+  $("reverseDiskTb").closest("label").querySelector("span").textContent="每台原始数据盘总量 TB";
+  $("reverseDiskTb").closest(".grid-two").insertAdjacentHTML("afterend",`<details id="reverseStorageEditor" class="workload-options"><summary>数据盘容量口径</summary>
+    <label class="field"><span>容量口径</span><select id="reverseStorageMode"><option value="legacy">旧口径（原始盘与统一预留）</option><option value="net">净容量（RAID 与空间预算）</option></select></label>
+    <div id="reverseStorageFields" class="grid-two"><label class="field"><span>数据盘 RAID</span><select id="reverseStorageRaid"><option value="unknown">待确认</option><option value="raid0">RAID0 / 单盘（无冗余）</option><option value="raid5">RAID5</option><option value="raid10">经典双副本 RAID10</option></select></label>
+    ${numeric.map(([field,label,min,max,step,value])=>`<label class="field"><span>${label}</span><input id="reverseStorage${field}" type="number" min="${min}" ${max===""?"":`max="${max}"`} step="${step}" value="${value}"></label>`).join("")}${renderRecoveryWorkspaceFields("reverseStorage")}</div></details>`);
+  const values={...storageProfileDefaults,...Object.fromEntries(numeric.map(([field,,,,,value])=>[field,value]))};
+  Object.entries(values).forEach(([field,value])=>{const id="reverseStorage"+field;inputs.push(id);defaults[id]=value;});
+}
+
+function syncReverseStorageFields() {
+  const net=$("reverseStorageMode").value==="net";
+  $("reverseStorageFields").hidden=!net;
+  $("reverseStorageFields").querySelectorAll("input,select").forEach(field=>{field.disabled=!net;});
+  syncRecoveryWorkspaceFields("reverseStorage",net);
+}
+
+function renderRecoveryWorkspaceFields(prefix) {
+  return `<label class="field"><span>每主机恢复工作区口径</span><select id="${prefix}RecoveryMode"><option value="unknown">未评估</option><option value="none">声明无需额外工作区</option><option value="included">已含在临时空间预算</option><option value="extra">独立额外工作区</option></select></label><label class="field"><span>每主机恢复工作区 TB</span><input id="${prefix}RecoveryTb" type="number" min="0" step="any" value="0"></label><label class="field"><span>预算依据（用户声明）</span><input id="${prefix}RecoverySource" value=""></label>`;
+}
+
+function syncRecoveryWorkspaceFields(prefix,enabled) {
+  const mode=$(prefix+"RecoveryMode").value;
+  for(const [field,active]of [["RecoveryTb",["included","extra"].includes(mode)],["RecoverySource",mode!=="unknown"]]) {
+    const input=$(prefix+field);input.disabled=!enabled||!active;input.closest("label").classList.toggle("hidden",!enabled||!active);
+  }
 }
 
 function renderBusinessTenantEditor() {
@@ -4267,6 +4416,14 @@ function renderReverseTenantEditor() {
         <small>独立模式仍计入客户服务器总量，并进行资源池容量红线检查。</small>
       </label>
       ${renderPrimarySelector(tenant, index, "reverse")}
+      <label class="field compact-field">
+        <span>磁盘数据需求</span>
+        <select class="tenant-input" data-mode="reverse" data-index="${index}" data-key="storageDemandMode">
+          <option value="unknown" ${(tenant.storageDemandMode ?? "unknown") === "unknown" ? "selected" : ""}>未评估</option>
+          <option value="explicit" ${tenant.storageDemandMode === "explicit" ? "selected" : ""}>规划单份数据量</option>
+        </select>
+      </label>
+      ${tenant.storageDemandMode === "explicit" ? renderReverseDataTimeFields(tenant,index) : ""}
       <div class="grid-two">
         <label class="field compact-field">
           <span>租户形态</span>
@@ -4306,6 +4463,15 @@ function renderReverseTenantEditor() {
       </div>
     </article>
   `).join("");
+}
+
+function renderReverseDataTimeFields(tenant,index) {
+  const basis=tenant.dataTimeBasis??"planned";
+  const input=(key,label,value,min=0,step="any",max="")=>`<label class="field compact-field"><span>${label}</span><input class="tenant-input" data-mode="reverse" data-index="${index}" data-key="${key}" type="number" min="${min}" step="${step}" ${max===""?"":`max="${max}"`} value="${escapeAttr(tenant[key]??value)}"></label>`;
+  const group=(key,label)=>`<label class="field compact-field"><span>${label}</span><input class="tenant-input" data-mode="reverse" data-index="${index}" data-key="${key}" value="${escapeAttr(tenant[key]??"")}"></label>`;
+  return `<label class="field compact-field"><span>数据时点口径</span><select class="tenant-input" data-mode="reverse" data-index="${index}" data-key="dataTimeBasis"><option value="planned" ${basis==="planned"?"selected":""}>规划量（已含增长）</option><option value="current" ${basis==="current"?"selected":""}>当前量 + 年增长 + 年限</option></select></label>${basis==="current"
+    ? input("currentDataTb","当前单份数据 TB（不含副本）",1)+input("dataGrowthFactor","数据年增长倍数（1=不增长）",1,1)+input("dataYears","数据规划年限（0至100）",3,0,"1",100)+group("currentDnGroupDataInput","各Group当前数据TB（可选JSON数组，合计等于当前单份数据量）")
+    : input("plannedDataTb","规划单份数据 TB（含已规划增长，不含副本）","")+input("plannedDataYears","规划量覆盖年限（可空，0至100）","",0,"1",100)+group("dnGroupDataInput","逐Group规划数据TB（可选JSON数组，合计等于单份数据量）")}`;
 }
 
 function syncParameterPanels() {
@@ -4756,7 +4922,9 @@ function renderFormula(data) {
       `实际物理服务器 ${getPlanServers(data).length} 台；同租户生产 CN 仍跨物理机；每实例规格参与 CPU/内存/磁盘水位校验。`,
       "共享DN负载采用等效规划TPS时必须匹配混合SQL标定，0表示未评估；当前不以错峰或异地缩减替代接管能力验证。",
       ...getLayoutFeasibilityAudits(data).map(formatLayoutFeasibility),
-      ...getStorageCapacityAudits(data).map(item=>item.text)
+      ...getStorageCapacityAudits(data).map(item=>item.text),
+      ...getRecoveryWorkspaceAudits(data).map(item=>item.text),
+      ...getDataHorizonAudits(data).map(item=>item.text)
     ].join("\n");
     return;
   }
@@ -4807,7 +4975,9 @@ function renderFormula(data) {
     `双主机组混部 = CN+DN、GTM+管理 ${data.serverSizing.cnDnGtmMgrMixedServers} 台；GTM 亲和结果 = ${data.serverSizing.gtmAffinityLabel}`,
     `当前组件组合 = ${data.serverSizing.componentLayoutLabel}；${getDeploymentArchitectureText(data.serverSizing)}；数量估算 = ${data.serverSizing.recommendedServers} 台`,
     ...getLayoutFeasibilityAudits(data).map(formatLayoutFeasibility),
-    ...getStorageCapacityAudits(data).map(item=>item.text)
+    ...getStorageCapacityAudits(data).map(item=>item.text),
+    ...getRecoveryWorkspaceAudits(data).map(item=>item.text),
+    ...getDataHorizonAudits(data).map(item=>item.text)
   ].join("\n");
   $("formulaOutput").textContent = text;
 }
@@ -4831,6 +5001,8 @@ function renderReverseFormula(data) {
     `当前组件组合 = ${data.componentLayoutLabel}，按中心配额估算服务器 = ${data.requiredServerCount}`,
     ...getLayoutFeasibilityAudits(data).map(formatLayoutFeasibility),
     ...getStorageCapacityAudits(data).map(item=>item.text),
+    ...getRecoveryWorkspaceAudits(data).map(item=>item.text),
+    ...getDataHorizonAudits(data).map(item=>item.text),
     ...(data.centerQuotaAudit || []).map(site => `${site.az} 配额：需求 ${site.required} / 现有 ${site.available} / 已分配 ${site.assigned} / 缺口 ${site.missing} 台`),
     `当前按服务器序号轮转到各中心；满足上述中心配额需要总数至少 ${data.requiredServerCount} 台，未自动增加客户输入机器。`,
     `资源状态 = ${data.resourceState}`,
@@ -5131,7 +5303,7 @@ function renderBusinessPhysicalServerRow(server) {
   const audit = server.resourceAudit;
   const state = getServerAuditStatus(server);
   const specText = spec
-    ? `${spec.model} · ${spec.sockets}路/${spec.cores}物理核 · ${spec.memoryGb}GB · ${formatHostDiskCapacity(server)}${audit && !audit.issues?.length ? ` · 水位 CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / ${spec.storage?.mode==="net"?"净空间":"磁盘"} ${audit.diskPercent}%` : ""}`
+    ? `${spec.model} · ${spec.sockets}路/${spec.cores}物理核 · ${spec.memoryGb}GB · ${formatHostDiskCapacity(server)}${audit && !audit.issues?.length ? ` · 水位 CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / ${spec.storage?.mode==="net"?"净空间":"磁盘"} ${audit.diskDemandUnknown?"未评估":`${audit.diskPercent}%`}` : ""}`
     : "预留机型待确认";
   return `
     <article class="server-row physical-output-row">
@@ -5150,7 +5322,7 @@ function renderServerPlanRow(server) {
       <strong>${server.id}</strong>
       <span>${server.az}</span>
       <small>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")}：${escapeAttr(roleText)}</small>
-      <i>CPU ${server.cpuLoad}% / 磁盘 ${server.diskLoad}%</i>
+      <i>CPU ${server.cpuLoad}% / 磁盘 ${formatServerDiskLoad(server)}</i>
     </article>
   `;
 }
@@ -5158,6 +5330,7 @@ function renderServerPlanRow(server) {
 function getReverseConclusion(data) {
   if (!getPlanRoleIdentityAudit(data).complete) return "实例身份或落位未通过，请先核对缺失、重复、中心与资源池，再评估扩容；当前不可作为可用部署方案";
   if (data.resourceState === "不足") return "需增加服务器或降低分片/副本/隔离要求";
+  if (data.storageDemandComplete === false) return "已录入资源可作初算，部分租户数据需求未评估，不能确认完整磁盘承载";
   if (data.environment === "poc") return "可用于 POC 验证，生产需重新按隔离规则评审";
   if (data.resourceState === "临界") return "可做生产初评，建议扩容后上线";
   return "可作为生产架构初稿，仍需厂商评审和压测确认";
@@ -5381,7 +5554,7 @@ function getRoleSpecLabel(role, data = latestDesignData) {
   if (!data || (!isCnRole(role) && !isDnRole(role))) return "";
   const d = getRoleResourceDemand(role, data.tenantPlans, data);
   if (d.unknown) return "规格未评估（角色身份非法或未知）";
-  return `${d.cpu}物理核 / ${d.memory}GB${isDnRole(role) ? ` / 数据${round(d.disk)}TB` : ""}`;
+  return `${d.cpu}物理核 / ${d.memory}GB${isDnRole(role) ? (d.diskUnknown ? " / 数据未评估" : ` / 数据${round(d.disk)}TB`) : ""}`;
 }
 
 function renderPptServerTopology(data) {
@@ -5686,7 +5859,7 @@ function renderTopologyServerTiles(servers) {
         </div>
         <p>${escapeAttr(roleGroups)}</p>
         <small class="reverse-server-detail">${escapeAttr(renderServerRoleDetail(server.roles))}</small>
-        <small>CPU ${server.cpuLoad}% · 磁盘 ${server.diskLoad}% · ${server.roles.length ? `${server.roles.length} 组件实例` : "预留节点"}</small>
+        <small>CPU ${server.cpuLoad}% · 磁盘 ${formatServerDiskLoad(server)} · ${server.roles.length ? `${server.roles.length} 组件实例` : "预留节点"}</small>
       </article>
     `;
   }).join("");
@@ -6029,7 +6202,7 @@ function renderServerBoard(data) {
           <article class="server-tile">
             <div><strong>${server.id}</strong><span>${server.az}</span></div>
             <p>${escapeAttr(server.roles.length ? displayRoles(server.roles).join(" / ") : "预留资源")}</p>
-            <small>CPU ${server.cpuLoad}% · 磁盘 ${server.diskLoad}%</small>
+            <small>CPU ${server.cpuLoad}% · 磁盘 ${formatServerDiskLoad(server)}</small>
           </article>
         `).join("")}
       </div>
@@ -6521,6 +6694,8 @@ function buildExcelSheets(data) {
   if (data.dnCalibration) summaryRows.push(["DN 性能标定", data.dnCalibration.unit, data.dnCalibration.description]);
   getLayoutFeasibilityAudits(data).forEach(item=>summaryRows.push(["组件组合落位核验",item.status,formatLayoutFeasibility(item)]));
   getStorageCapacityAudits(data).forEach(item=>summaryRows.push(["磁盘容量核对 / "+item.component,item.status,item.text]));
+  getRecoveryWorkspaceAudits(data).forEach(item=>summaryRows.push(["恢复工作区预算 / "+item.component,item.status,item.text]));
+  getDataHorizonAudits(data).forEach(item=>summaryRows.push(["数据时点与三年参考 / "+item.component,item.status,item.text]));
   if (data.environment === "poc") {
     summaryRows.push(["POC 实例密度", data.resourceReduction.densityEnabled ? "启用" : "关闭",
       data.resourceReduction.densityEnabled
@@ -6574,11 +6749,11 @@ function buildExcelSheets(data) {
     tenant.shardManual ? "是" : "否",
     tenant.replicasPerShard,
     tenant.dnInstances,
-    Number(round(tenant.futureDataTb || 0)),
+    data.reverse && !tenant.storageDemandKnown ? "未评估" : Number(round(tenant.futureDataTb || 0)),
     tenant.gtmGroupText,
     tenant.cnSpecLabel || `${tenant.cnCores}C/${tenant.cnMemoryGb}GB`,
     tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`,
-    tenant.cnBelowMinimum || tenant.shardBelowMinimum ? "未通过" : tenant.workloadIssues?.length ? "需复核" : "通过",
+    tenant.cnBelowMinimum || tenant.shardBelowMinimum ? "未通过" : data.reverse ? (tenant.storageDemandKnown ? "已计入数据，落位另验" : "数据需求未评估") : tenant.workloadIssues?.length ? "需复核" : "通过",
     tenant.tenantId,
     tenant.plannedTxnTps === undefined ? "未评估" : Number(round(tenant.plannedTxnTps)),
     dnPrimaryLabels[tenant.primaryStrategy || "balanced"]
@@ -6619,7 +6794,7 @@ function buildExcelSheets(data) {
       server.roles.map((role) => formatExcelRole(role, data.tenantPlans)).join(" / ") || "扩容预留",
       known ? audit.cpuPercent : "未评估",
       known ? audit.memoryPercent : "未评估",
-      known ? audit.diskPercent : "未评估",
+      known && !audit.diskDemandUnknown ? audit.diskPercent : "未评估",
       state.status,
       server.spec
         ? `${server.spec.model}；${server.spec.sockets}路/${server.spec.cores}物理核；${server.spec.memoryGb}GB；${formatHostDiskCapacity(server)}；${server.spec.network}`
@@ -6653,7 +6828,7 @@ function buildExcelSheets(data) {
     role,
     ...["cpu", "memory", "disk"].map(key => {
       const demand = getRoleResourceDemand(role, data.tenantPlans, data);
-      return demand.unknown ? "未评估" : demand[key];
+      return demand.unknown || (key === "disk" && demand.diskUnknown) ? "未评估" : demand[key];
     })
   ])));
   const instanceSheet = buildExcelTableSheet({
@@ -6697,9 +6872,9 @@ function buildExcelSheets(data) {
     const state = getServerAuditStatus(server);
     riskRows.push([
       "服务器水位",
-      state.status === "通过" ? "通过" : "高风险",
+      state.status === "通过" ? "通过" : state.status === "部分未评估" ? "未评估" : "高风险",
       `${server.id} / ${server.az}`,
-      !server.spec || !audit || audit.issues?.length ? `${state.status}：${state.detail}` : `CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / ${server.spec.storage?.mode==="net"?"净数据空间":"磁盘"} ${audit.diskPercent}%；CPU/内存预留 ${round((data.reverse ? data.reserveRatio : data.serverSizing.reserveRatio) * 100)}%；磁盘按主机口径核对`
+      !server.spec || !audit || audit.issues?.length ? `${state.status}：${state.detail}` : `CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / ${server.spec.storage?.mode==="net"?"净数据空间":"磁盘"} ${formatServerDiskLoad(server)}；CPU/内存预留 ${round((data.reverse ? data.reserveRatio : data.serverSizing.reserveRatio) * 100)}%；磁盘按主机口径核对`
     ]);
   });
   const validGtmRoles = [...getPlanRoleIdentityAudit(data).validRoleHosts.keys()].filter(isGtmRole);
@@ -7181,7 +7356,7 @@ function bindParameterEvents() {
     if (event.target.matches(".tenant-input")) {
       const update = updateTenantSpec(event.target);
       if (!update) return;
-      if (["type", "deploymentStrategy", "workloadMode", "cnSizingMode", "dnSizingMode", "batchSizingMode", "batchRateMode", "batchInputBasis", "cnFailurePolicy", "cnPreset", "batchPreset", "onlineCalibrationMode", "batchCalibrationMode", "onlineBenchmarkMode", "batchBenchmarkMode", "batchWindowCheck"].includes(update.key)) {
+      if (["type", "deploymentStrategy", "storageDemandMode", "dataTimeBasis", "workloadMode", "cnSizingMode", "dnSizingMode", "batchSizingMode", "batchRateMode", "batchInputBasis", "cnFailurePolicy", "cnPreset", "batchPreset", "onlineCalibrationMode", "batchCalibrationMode", "onlineBenchmarkMode", "batchBenchmarkMode", "batchWindowCheck"].includes(update.key)) {
         render();
         return;
       }
@@ -7257,7 +7432,7 @@ function updateTenantSpec(input) {
   const target = list[index];
   if (!target) return;
   const key = input.dataset.key;
-  const numericKeys = new Set(["qps", "dataTb", "minShards", "replicaCount", "cnPerAz", "shardCount", "cnCores", "cnMemoryGb", "dnCores", "dnMemoryGb"]);
+  const numericKeys = new Set(["qps", "dataTb", "plannedDataTb", "currentDataTb", "dataGrowthFactor", "dataYears", "plannedDataYears", "minShards", "replicaCount", "cnPerAz", "shardCount", "cnCores", "cnMemoryGb", "dnCores", "dnMemoryGb"]);
   target[key] = input.type === "checkbox" ? input.checked : numericKeys.has(key) && input.value.trim() !== "" ? Number(input.value) : input.value;
   if (mode === "business" && key === "batchInputBasis") {
     const volume = ["work", "sqlWindow"].includes(target.batchRateMode);
@@ -7475,5 +7650,6 @@ function initializePocControls() {
 renderComponentMachineEditor();
 initializePocControls();
 initializeStorageControls();
+initializeReverseStorageControls();
 bindParameterEvents();
 render();

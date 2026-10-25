@@ -90,7 +90,7 @@ try {
   check('restored-invalid-draft-blocks',await page.evaluate(()=>!latestDesignData&&$('businessStorageCnRaid').value==='unknown'));
   await page.evaluate(()=>{$('designModule').value='reverse';render();});
   check('reverse-not-blocked-by-business-draft',await page.evaluate(()=>!!latestDesignData&&latestDesignData.reverse));
-  check('reverse-demand-explicitly-unassessed',await page.evaluate(()=>getStorageCapacityAudits(latestDesignData)[0].text.includes('反推尚未提供业务数据量')));
+  check('reverse-demand-explicitly-unassessed',await page.evaluate(()=>getStorageCapacityAudits(latestDesignData)[0].text.includes('尚未提供全部业务数据量')&&getStorageCapacityAudits(latestDesignData)[0].status.includes('需求未评估')));
   await page.evaluate(()=>{resetForm();});
   check('reset-restores-legacy-defaults',await page.evaluate(()=>componentServerDefinitions.every(({key})=>$(storageInputId(key,'Mode')).value==='legacy'&&$(storageInputId(key,'Raid')).value==='unknown'&&$(storageInputId(key,'LogTb')).value==='0')));
   await page.evaluate(()=>{
