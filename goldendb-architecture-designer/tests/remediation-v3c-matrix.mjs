@@ -1,0 +1,62 @@
+import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';import {chromium} from '/Users/xiaoba/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs';
+const out=path.resolve(process.env.REMEDIATION_TEST_OUTPUT||'outputs/goldendb-v3c-20261027/matrix');fs.mkdirSync(out,{recursive:true});const browser=await chromium.launch({channel:'chrome',headless:true}),page=await browser.newPage({viewport:{width:1600,height:1100}});const results=[],models=[],errors=[];page.on('pageerror',e=>errors.push(e.message));const check=(name,pass)=>results.push({name,pass});
+const profiles=[{name:'legacy',mode:'legacy',raid:'unknown',count:8,spare:0},{name:'raid0',mode:'net',raid:'raid0',count:8,spare:0},{name:'raid5',mode:'net',raid:'raid5',count:8,spare:1},{name:'raid10',mode:'net',raid:'raid10',count:10,spare:2}];
+try{await page.goto('file://'+path.resolve('goldendb-architecture-designer/index.html'));
+ const cases=[];for(const module of ['business','reverse'])for(const profile of profiles)for(const recovery of ['unknown','none','included','extra'])for(const variant of Array.from({length:8},(_,i)=>i))cases.push({module,profile,recovery,variant});
+ for(let i=0;i<cases.length;i++){
+ const entry=await page.evaluate(({module,profile,recovery,variant})=>{
+  const poc=!!(variant&1),mixed=!!(variant&2),grown=!!(variant&4);
+  const checks=[],check=(name,pass)=>checks.push({name,pass}),near=(a,b)=>Math.abs(a-b)<=1e-10*Math.max(Math.abs(a),Math.abs(b),1e-20);
+  resetForm();$('designModule').value=module;$('environmentType').value=poc?'poc':'production';const prefix=module==='business'?'business':'reverse';const count=profile.count,raw=count*2;
+  const storage={Mode:profile.mode,Raid:profile.raid,SpareDisks:profile.spare,FsReserveRatio:.1,LogTb:1,IndexTb:.5,TempTb:.3,Watermark:.8,RecoveryMode:recovery,RecoveryTb:recovery==='included'?.2:1,RecoverySource:'V3c独立测试预算，不是厂商配置'};
+  const rawTenants=[3,1].map((n,j)=>({name:'矩阵租户'+(j+1),type:'distributed',deploymentStrategy:'shared',primaryStrategy:mixed?'centerB':'centerA',cnPerAz:2,cnPerAzManual:true,replicaCount:poc?4:6,cnCores:8,cnMemoryGb:32,dnCores:2,dnMemoryGb:8,shardCount:n,minShards:n,minShardsManual:true,cnSizingMode:'manual',qps:1000,dataTb:j?1:3,storageDemandMode:'explicit',dataTimeBasis:grown?'current':'planned',plannedDataTb:j?1:3,plannedDataYears:3,currentDataTb:j?1:3,dataGrowthFactor:1.5,dataYears:3,dnGroupDataInput:JSON.stringify(n===3?[1.5,.75,.75]:[1]),currentDnGroupDataInput:JSON.stringify(n===3?[1.5,.75,.75]:[1])}));
+  if(module==='reverse'){$('reverseDeploymentMode').value=poc?'twoSiteThreeDc':'local2az';$('reverseServerCount').value=120;$('reverseCpuCores').value=128;$('reverseMemoryGb').value=1024;$('reverseDiskTb').value=raw;$('reverseMaxDnPerServer').value=4;$('reverseMaxCnPerServer').value=4;$('reverseManagementNodes').value=poc?3:6;$('reverseGtmReplicasPerGroup').value=poc?3:6;for(const [f,v]of Object.entries({...storage,DiskCount:count,DiskTb:2}))$('reverseStorage'+f).value=v;reverseTenantSpecs=cloneTenantSpecs(rawTenants);}
+  else{$('deploymentMode').value=poc?'twoSiteThreeDc':'local2az';$('forceEven').checked=false;$('businessServerConfigMode').value='customer';$('customerDnEnabled').checked=true;$('customerDnCores').value=128;$('customerDnMemoryGb').value=1024;$('customerDnDataDiskCount').value=count;$('customerDnDataDiskTb').value=2;$('customerDnMaxInstances').value=4;$('businessHostModelSource').value=mixed?'dn':'component';$('businessManagementNodes').value=poc?3:6;$('businessGtmReplicasPerGroup').value=poc?3:6;$('growthFactor').value=grown?1.5:1;$('years').value=3;$('transactionGrowthFactor').value=1;$('maxShardTb').value=100;for(const [f,v]of Object.entries(storage))$(storageInputId('dn',f)).value=v;businessTenantSpecs=cloneTenantSpecs(rawTenants);}
+  $(prefix+'MaxTenantDnPerServer').value=4;$(prefix+'DnTenantPlacement').value=mixed?'shared':'isolated';$(prefix+'CnTenantPlacement').value=mixed?'shared':'isolated';$(prefix+'AllowCnDnMixed').checked=mixed;$(prefix+'AllowGtmManagementMixed').checked=true;$(prefix+'AllowAllMixed').checked=false;render();
+  const d=latestDesignData;if(!d)return {checks:[{name:'valid-model',pass:false}],error:document.querySelector('#planningInputStatus').textContent};
+  check('valid-model',true);const before=JSON.stringify(d),growth=grown?Math.pow(1.5,3):1;
+  const arrayDisks=profile.raid==='raid0'?count:profile.raid==='raid5'?count-profile.spare-1:(count-profile.spare)/2;
+  const extra=profile.mode==='net'&&recovery==='extra'?1:0;
+  const usable=profile.mode==='legacy'?raw*.65:(arrayDisks*2*.9-1-.5-.3-extra)*.8;
+  const cap=getDiskCapacity(d.componentSpecs.dn,d.reverse?d.reserveRatio:d.serverSizing.reserveRatio);
+  check('independent-net-capacity',near(cap.usableTb,usable));check('raw-not-overwritten',cap.rawTb===raw);
+  check('growth-once',d.tenantPlans.every((t,j)=>near(t.futureDataTb,(j?1:3)*growth)));
+  const planned=d.tenantPlans.reduce((n,t)=>n+t.futureDataTb*t.replicasPerShard,0);
+  check('per-tenant-replica-total',d.dnInstances===d.tenantPlans.reduce((n,t)=>n+t.shardCount*t.replicasPerShard,0));
+  check('explicit-group-growth-once',d.tenantPlans.every((t,j)=>t.dnGroupDataTb.every((v,g)=>near(v,(j?1:[1.5,.75,.75][g])*growth))));
+  const hosts=getPlanServers(d),dataById=new Map(d.tenantPlans.map(t=>[getTenantKey(t),t]));let actualData=0;
+  for(const h of hosts){const dn=h.roles.map(parseDnPlacementRole).filter(Boolean);if(!dn.length)continue;const sum=dn.reduce((n,p)=>n+(p.tenant===getTenantKey(d.tenantPlans[0])?[1.5,.75,.75][p.group-1]:1)*growth,0);actualData+=sum;check('host-ledger-'+h.id,near(sum,h.resourceAudit.used.disk)&&near(h.resourceAudit.usable.disk,usable)&&h.resourceAudit.withinWatermark);}
+  const identity=getPlanRoleIdentityAudit(d);check('actual-data-does-not-exceed-plan',actualData<=planned+1e-9);check('complete-implies-total-conserved',!identity.complete||near(actualData,planned));
+  const tooLarge=d.tenantPlans.some(t=>Math.max(...t.dnGroupDataTb)>usable+1e-10);const selected=getLayoutFeasibilityAudits(d).find(a=>a.selected);check('large-group-not-hidden',!tooLarge||selected.feasibleServers===null);
+  check('layout-not-false-complete',identity.complete||selected.feasibleServers===null);
+  const policy=getStorageCapacityAudits(d).filter(a=>d.reverse||a.component==='DN 数据节点');check('raid0-production-policy',profile.mode!=='net'||profile.raid!=='raid0'||poc||policy.some(a=>a.error));
+  const rebuild=getDnRebuildAudits(d);check('rebuild-no-production-claim',rebuild.every(a=>a.status==='未评估'&&a.text.includes('RPO/RTO')));
+  check('audit-read-only',JSON.stringify(d)===before);
+  if(mixed){const candidate=buildLayoutCandidate(d,'cnDnMixed');check('candidate-preserves-growth',candidate.tenantPlans.every((t,j)=>near(t.futureDataTb,(j?1:3)*growth)));check('candidate-disk-budget',getPlanServers(candidate).filter(h=>h.roles.some(isDnRole)).every(h=>near(h.resourceAudit.usable.disk,usable)));}
+  return {checks,snapshot:{module,profile:profile.name,recovery,variant,poc,mixed,grown,usableTb:usable,futureTb:d.tenantPlans.map(t=>t.futureDataTb),replicas:d.tenantPlans.map(t=>t.replicasPerShard),planned,actualData,identity:identity.complete,selected:selected.status}};
+ },cases[i]);for(const c of entry.checks)results.push({name:JSON.stringify(cases[i])+' / '+c.name,pass:c.pass,...(entry.error?{error:entry.error}:{})});models.push(entry.snapshot);if(i%8===7)console.log('matrix cases '+(i+1)+'/'+cases.length);
+ }
+ results.push(...await page.evaluate(()=>{const r=[],c=(name,pass)=>r.push({name,pass});
+  for(const [name,u,b,want]of [['decimal',.1+.2,.3,true],['real-excess',.300000001,.3,false],['tiny-excess',2e-300,1e-300,false],['zero-not-padded',Number.MIN_VALUE,0,false],['invalid',NaN,1,false],['infinite',Infinity,Infinity,false]])c('budget-'+name,withinResourceBudget(u,b)===want);
+  const t={tenantId:'TID-edge',name:'edge',shardCount:2,replicasPerShard:2,dnCores:1,dnMemoryGb:1,futureDataTb:.3,storageDemandKnown:true,dnGroupDataTb:[.1,.2]},role='TID-edge-DN-G2-Master';
+  for(const [name,values]of [['empty',[]],['short',[.1]],['null-entry',[.1,null]],['negative',[.1,-.1]],['nan',[.1,NaN]],['sparse',Object.assign(Array(2),{0:.1})]]){const x={...t,dnGroupDataTb:values};c('explicit-'+name,getRoleResourceDemand(role,[x]).unknown===true);}
+  const many={...t,shardCount:1000,replicasPerShard:1,futureDataTb:300,dnGroupDataTb:Array(1000).fill(.3)};
+  const longHost={spec:{cores:1000,memoryGb:1000,diskTb:300},roles:Array.from({length:1000},(_,i)=>`TID-edge-DN-G${i+1}-Master`)};
+  const longAudit=getServerResourceAudit(longHost,{tenantPlans:[many],reserveRatio:0});
+  c('compensated-1000-fractional-groups',longAudit.used.disk===300&&longAudit.withinWatermark);
+  const mutated=structuredClone(latestDesignData);mutated.tenantPlans[0].dnGroupDataTb=[];
+  c('stale-resource-audit-cannot-hide-invalid-group-array',getDnFailureCoverage(mutated).find(x=>x.tenant===getTenantKey(mutated.tenantPlans[0])&&x.scenario==='normal').missing.length===mutated.tenantPlans[0].shardCount);
+  c('uniform-only-when-absent' ,getRoleResourceDemand(role,[{...t,dnGroupDataTb:null}]).disk===.15);
+  c('zero-explicit-kept',getRoleResourceDemand(role,[{...t,dnGroupDataTb:[.3,0]}]).disk===0);
+  for(const [name,patch]of [['zero-water',{watermark:0}],['negative-log',{logTb:-1}],['included-over-temp',{recoveryMode:'included',recoveryTb:.4}],['blank-source',{recoverySource:''}],['empty-budget',{recoveryTb:''}],['exhausted',{recoveryTb:20}]]){const s={cores:128,memoryGb:1024,diskTb:16,dataDiskCount:8,dataDiskTb:2,storage:{mode:'net',raid:'raid5',spareDisks:1,fsReserveRatio:.1,logTb:1,indexTb:.5,tempTb:.3,watermark:.8,recoveryMode:'extra',recoveryTb:1,recoverySource:'测试',...patch}};let bad=false;try{getDiskCapacity(s,.35);}catch(e){bad=e instanceof PlanningInputError;}c('cross-invalid-'+name,bad);}
+  resetForm();$('designModule').value='reverse';reverseTenantSpecs=cloneTenantSpecs([{...defaultReverseTenants[0],storageDemandMode:'explicit',plannedDataTb:0,shardCount:3,dnGroupDataInput:'[0,0,0]',replicaCount:6}]);render();c('ui-explicit-zero-valid',!!latestDesignData&&latestDesignData.storedDataTb===0);reverseTenantSpecs[0].dnGroupDataInput='[0,0,1e-12]';render();c('ui-zero-no-positive-tolerance',!latestDesignData&&$('downloadExcelBtn').disabled);reverseTenantSpecs[0].dnGroupDataInput='[0,0]';render();c('ui-partial-blocks-export',!latestDesignData&&$('downloadExcelBtn').disabled);
+  return r;}));
+ for(const module of ['business','reverse']){await page.evaluate(module=>{resetForm();$('designModule').value=module;if(module==='reverse'){$('reverseServerCount').value=60;$('reverseCpuCores').value=128;$('reverseMemoryGb').value=1024;Object.assign(reverseTenantSpecs[0],{storageDemandMode:'explicit',dataTimeBasis:'current',currentDataTb:3,dataGrowthFactor:1.5,dataYears:3,currentDnGroupDataInput:'[1.5,0.5,0.5,0.5]'});Object.assign(reverseTenantSpecs[1],{storageDemandMode:'explicit',plannedDataTb:0});}render();},module);
+  check(module+'-export-fixture-valid',await page.evaluate(()=>!!latestDesignData));
+  fs.writeFileSync(path.join(out,module+'-sheets.json'),JSON.stringify(await page.evaluate(()=>buildExcelSheets(latestDesignData))));
+  for(const [id,file]of [['downloadExcelBtn','planning.xlsx'],['downloadTopologyBtn','network.png'],['downloadServerTopologyBtn','servers.png']]){const wait=page.waitForEvent('download');await page.locator('#'+id).click();await(await wait).saveAs(path.join(out,module+'-'+file));check(module+'-download-'+file,fs.statSync(path.join(out,module+'-'+file)).size>1000);}
+ }
+ for(const width of [390,875,1600]){await page.setViewportSize({width,height:1100});await page.locator('.dn-rebuild-summary').scrollIntoViewIfNeeded();check('responsive-'+width,await page.locator('#placementDetails').evaluate(e=>e.scrollWidth<=e.clientWidth+1));await page.screenshot({path:path.join(out,'matrix-'+width+'.png')});}
+ check('browser-errors',!errors.length);
+}finally{await browser.close();fs.writeFileSync(path.join(out,'results.json'),JSON.stringify({sourceHash:createHash('sha256').update(fs.readFileSync('goldendb-architecture-designer/app.js')).digest('hex'),results,models,errors},null,2));}
+console.log(JSON.stringify({passed:results.filter(r=>r.pass).length,total:results.length,failed:results.filter(r=>!r.pass).slice(0,12),failedCount:results.filter(r=>!r.pass).length,errors}));if(results.some(r=>!r.pass)||errors.length)process.exitCode=1;

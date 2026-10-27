@@ -1268,7 +1268,9 @@ function getDnFailureCoverage(data) {
       for (let replica=1; replica<=tenant.replicasPerShard; replica++) {
         const role = `${key}-DN-G${i+1}-${replica===1?"Master":`Slave${replica-1}`}`;
         const placed = roles.get(role) || [];
+        const demand = getRoleResourceDemand(role,data.tenantPlans,data);
         if (placed.length===1 && identity.validRoleHosts.get(role) === placed[0].host
+          && !demand.unknown && Number.isFinite(demand.disk)
           && placed[0].host.resourceAudit?.withinWatermark) copies.push(placed[0]);
       }
       return {group:i+1,copies};
@@ -1297,6 +1299,126 @@ function getDnFailureCoverage(data) {
     });
     return rows;
   });
+}
+
+// V3b3b2: read-only, bounded DN replica rebuild placement. This is not recovery certification.
+const dnRebuildCache = new WeakMap();
+
+function getDnRebuildAudits(data, limits = {}) {
+  const signature = JSON.stringify([data, limits]);
+  const cached = dnRebuildCache.get(data);
+  if (cached?.signature === signature) return cached.rows;
+  const scope = "仅模拟单台DN宿主机失效后，在既有幸存主机上补回原AZ/池的DN副本；不迁移现存副本，不增加库存，不扣第二次恢复工作区。源候选不等于实际可读/复制追平；恢复策略、并发IO、控制面、RPO/RTO未验证。";
+  const save = rows => { dnRebuildCache.set(data, {signature, rows}); return rows; };
+  const unknown = reason => save([{host:null,status:"未评估",placementStatus:"未评估",placementError:false,error:false,
+    lost:[],assignments:[],reason,text:`DN整机重建：未评估。${reason}。${scope}`}]);
+  const hosts = getPlanServers(data);
+  const sizing = data.reverse ? data : data.serverSizing;
+  const reduction = data.resourceReduction;
+  if (Object.values(limits).some(v=>!Number.isSafeInteger(v)||v<0)) return unknown("检查预算非法，不能绕过规模保护");
+  const maxHosts = Math.min(200, Math.max(0, Math.floor(limits.maxHosts ?? 200)));
+  const maxScenarios = Math.min(80, Math.max(0, Math.floor(limits.maxScenarios ?? 80)));
+  const maxRoles = Math.min(1000, Math.max(0, Math.floor(limits.maxRoles ?? 1000)));
+  const maxVisits = Math.min(20000, Math.max(0, Math.floor(limits.maxVisits ?? 20000)));
+  const dnHosts = hosts.filter(h=>h.roles.some(isDnRole));
+  const roleCount = hosts.reduce((sum,h)=>sum+h.roles.length,0);
+  if (hosts.length>maxHosts || dnHosts.length>maxScenarios || roleCount>maxRoles) return unknown("超过本次结构审计预算（200台库存/80个故障场景/1000实例），不能用总空闲空间推断可行");
+  if (!dnHosts.length) return unknown("没有已落位DN宿主机");
+  if (new Set(hosts.map(h=>h.id)).size!==hosts.length) return unknown("物理主机ID重复，无法定义单机故障与反亲和");
+  const identity = getPlanRoleIdentityAudit(data);
+  if (!identity.complete || getDnReplicaHostViolations(hosts).length) return unknown("当前实例身份、目标AZ/池或DN副本跨机不完整，不能作为重建基线");
+  if (!reduction || !sizing || !(sizing.maxDnPerServer>0) || !(reduction.maxTenantDnPerServer>0)) return unknown("DN密度/隔离策略缺失");
+  const config = {...data,reserveRatio:data.reverse?data.reserveRatio:data.serverSizing.reserveRatio};
+  const tenants = new Map(data.tenantPlans.map(t=>[getTenantKey(t),t]));
+  const canonical = role=>role.replace(/-Slave$/,"-Slave1");
+  const liveAudits = new Map();
+  for (const h of hosts) {
+    try { liveAudits.set(h.id,getServerResourceAudit(h,config)); }
+    catch(e) { if (!(e instanceof PlanningInputError)) throw e; liveAudits.set(h.id,null); }
+  }
+  // Readability is NOT asserted: these are expected, uniquely placed and budget-valid source candidates only.
+  const copies = [...identity.validRoleHosts].filter(([role,h])=>isDnRole(role)
+    && liveAudits.get(h.id)?.withinWatermark && !liveAudits.get(h.id)?.diskDemandUnknown
+    && h.resourceAudit?.withinWatermark!==false);
+  let totalVisits = 0;
+  const rows = dnHosts.map(failed=>{
+    const lost = failed.roles.filter(isDnRole).map(canonical);
+    const base = {host:failed.id,az:failed.az,status:"未评估",placementStatus:"未评估",placementError:false,error:false,
+      lost,assignments:[],sourceCandidates:[],visits:0};
+    const finish = (placementStatus,reason,assignments=[]) => ({...base,placementStatus,
+      placementError:placementStatus==="存在缺口",reason,assignments,
+      text:`DN整机重建 / ${failed.id}（${failed.az}）：${placementStatus}，待补${lost.length}个DN，试排${assignments.length}个。${reason}。${scope}`});
+    if (lost.length>32) return finish("未评估","单台故障待补超过32个DN，超过有界搜索深度");
+    const jobs=[];
+    for (const role of lost) {
+      const parsed=parseDnPlacementRole(role),tenant=tenants.get(parsed.tenant),need=getRoleResourceDemand(role,data.tenantPlans,data);
+      if (need.unknown || need.diskUnknown || ![need.cpu,need.memory,need.disk].every(v=>Number.isFinite(v)&&v>=0)) return finish("未评估","故障DN的数据需求或实例规格未知/非法");
+      const replica=parsed.role==="M"?1:Number(parsed.role.slice(1))+1;
+      const sourceCandidates=copies.filter(([r,h])=>h.id!==failed.id
+        && parseDnPlacementRole(r).tenant===parsed.tenant && parseDnPlacementRole(r).group===parsed.group)
+        .map(([r,h])=>({role:r,host:h.id,az:h.az}));
+      base.sourceCandidates.push({role,candidates:sourceCandidates});
+      if (!sourceCandidates.length) {
+        const uncertain=hosts.some(h=>h.id!==failed.id && h.roles.some(r=>{
+          const p=parseDnPlacementRole(r);return p?.tenant===parsed.tenant&&p.group===parsed.group;
+        }) && (!liveAudits.get(h.id) || liveAudits.get(h.id)?.diskDemandUnknown));
+        return finish(uncertain?"未评估":"存在缺口",uncertain?`${displayRole(role,data.tenantPlans)}源候选缺少可核对的资源/数据预算`:`${displayRole(role,data.tenantPlans)}没有幸存且身份/资源有效的源候选，不能用RAID热备或新补副本代替源`);
+      }
+      jobs.push({role,parsed,need,azIndex:getDnReplicaAz(tenant,parsed.group,replica,data),pool:getTenantResourcePoolKey(tenant),sourceCandidates});
+    }
+    const targets=hosts.filter(h=>h.id!==failed.id).map(h=>({...h,roles:[...h.roles]}));
+    let uncertainTargets=false;
+    const staticCandidates=new Map(jobs.map(job=>[job.role,targets.filter(h=>{
+      if(h.azIndex!==job.azIndex || h.tenantPool!==job.pool || !h.componentKeys.includes("dn"))return false;
+      const a=liveAudits.get(h.id);
+      if(!h.spec || !a || a.diskDemandUnknown){uncertainTargets=true;return false;}
+      return a.withinWatermark && h.resourceAudit?.withinWatermark!==false;
+    })]));
+    const fits=(h,job)=>!hasDnGroupRole(h,job.parsed.tenant,job.parsed.group)
+      && h.roles.filter(isDnRole).length<sizing.maxDnPerServer
+      && countTenantDnRoles(h,job.parsed.tenant)<reduction.maxTenantDnPerServer
+      && (reduction.dnTenantPlacement==="shared"||getServerDnTenants(h).every(t=>t===job.parsed.tenant))
+      && canPlaceRoleWithinWatermark(h,job.role,config);
+    const zero=jobs.find(j=>!staticCandidates.get(j.role).some(h=>fits(h,j)));
+    if(zero) return finish(uncertainTargets?"未评估":"存在缺口",`${displayRole(zero.role,data.tenantPlans)}在幸存同AZ/池中没有满足组件类型、反亲和、密度、隔离及单机CPU/内存/磁盘预算的目标${uncertainTargets?"；部分潜在目标规格/数据未知":""}`);
+    let exceeded=false;
+    const assignments=[];
+    function search(remaining) {
+      if (!remaining.length) return true;
+      const choices=remaining.map(job=>({job,hosts:staticCandidates.get(job.role).filter(h=>fits(h,job))}))
+        .sort((a,b)=>a.hosts.length-b.hosts.length||b.job.need.disk-a.job.need.disk);
+      const {job,hosts:eligible}=choices[0];
+      const rest=remaining.filter(j=>j!==job);
+      for(const h of eligible) {
+        if(totalVisits>=maxVisits){exceeded=true;return false;}
+        totalVisits++;base.visits++;
+        h.roles.push(job.role);
+        assignments.push({role:job.role,target:h.id,azIndex:h.azIndex,pool:h.tenantPool,demand:job.need,
+          sourceCandidates:job.sourceCandidates});
+        if(search(rest))return true;
+        assignments.pop();h.roles.pop();
+        if(exceeded)return false;
+      }
+      return false;
+    }
+    if(!search(jobs))return finish(exceeded||uncertainTargets?"未评估":"存在缺口",exceeded?"有界搜索预算耗尽，未确认可行/不可行，不输出部分试排为成功":uncertainTargets?"已知目标未能联合装下全部待补副本，且仍有规格/数据未知的潜在目标":"已穷尽当前受约束目标组合，联合CPU/内存/磁盘与密度不足；全池剩余容量之和不能替代逐主机落位");
+    // Recheck the final shared ledger, including all rebuilt replicas on each target.
+    if(targets.some(h=>assignments.some(a=>a.target===h.id)&&!getServerResourceAudit(h,config)?.withinWatermark))return finish("未评估","联合试排后的共享资源复核未通过");
+    return finish("预算内可排布（仅必要条件）","幸存源候选及联合目标落位已列出；依据当前数据量/实例配额和旧或净磁盘预算初算，实际源可读性与重建策略仍未评估",assignments);
+  });
+  return save(rows);
+}
+
+function getDnRebuildSummary(data) {
+  const rows=getDnRebuildAudits(data),placed=rows.filter(r=>r.assignments.length&&r.assignments.length===r.lost.length).length;
+  const gaps=rows.filter(r=>r.placementError).length,unknown=rows.length-placed-gaps;
+  return {rows,status:"未评估",placed,gaps,unknown,
+    text:`DN整机重建必要条件：${rows.filter(r=>r.host).length}个单机失效场景，预算内可排布${placed}、存在缺口${gaps}、未评估${unknown}。恢复策略/源可读性、复制与IO及RPO/RTO未评估；仅在既有幸存同AZ/池补回副本，不等于业务接管或恢复成功。`};
+}
+
+function renderDnRebuildAudit(data) {
+  const summary=getDnRebuildSummary(data);
+  return `<div class="dn-rebuild-summary"><h4>DN整机重建必要条件</h4><p>${escapeAttr(summary.text)}</p><details><summary>展开单机失效、源候选及联合目标检查</summary>${summary.rows.map(row=>`<p class="${row.placementError?"cn-placement-error":""}">${escapeAttr(row.text)}${row.assignments.length?`<br>${escapeAttr(row.assignments.map(a=>`${displayRole(a.role,data.tenantPlans)} → ${a.target}；源候选 ${a.sourceCandidates.map(s=>s.host).join("/")}`).join("；"))}`:""}</p>`).join("")}</details></div>`;
 }
 
 function getDnTakeoverCapacity(data) {
@@ -1952,7 +2074,7 @@ function getStorageCapacityAudits(data) {
     const details=data.tenantPlans.map(tenant=>`${tenant.name}：${tenant.storageDemandKnown?`单份 ${round(tenant.futureDataTb)}TB / ${tenant.shardCount} Group，${tenant.dnGroupDataTb?"按逐Group录入":"按均匀假设"}，${tenant.replicasPerShard}副本共 ${round(tenant.futureDataTb*tenant.replicasPerShard)}TB`:"数据需求未评估"}`).join("；");
     const status=error?"生产磁盘策略未通过":known.length===data.tenantPlans.length?(d.mode==="net"?"净容量工程初算 / 已录入需求":"已录入需求 / 净容量未评估"):(d.mode==="net"?"净容量初算 / 需求未评估":"旧口径 / 需求未评估");
     return [{component:"资源反推磁盘",status,error,
-      text:`${formatDiskCapacity(data.componentSpecs.dn,data.reserveRatio)}${policy} ${details}。已录入单份合计 ${round(data.futureDataTb)}TB，副本落盘 ${round(data.storedDataTb)}TB；${known.length===data.tenantPlans.length?`仅校验已录入数据与${d.mode==="net"?"净磁盘":"旧磁盘"}空间预算，不代表生产承载已通过`:"尚未提供全部业务数据量，当前磁盘用量只计已录入部分，不能代表实际承载已通过"}；当前量只增长一次，已含增长的规划量不重复增长。故障空间预算留后续批次。`}];
+      text:`${formatDiskCapacity(data.componentSpecs.dn,data.reserveRatio)}${policy} ${details}。已录入单份合计 ${round(data.futureDataTb)}TB，副本落盘 ${round(data.storedDataTb)}TB；${known.length===data.tenantPlans.length?`仅校验已录入数据与${d.mode==="net"?"净磁盘":"旧磁盘"}空间预算，不代表生产承载已通过`:"尚未提供全部业务数据量，当前磁盘用量只计已录入部分，不能代表实际承载已通过"}；当前量只增长一次，已含增长的规划量不重复增长。整机失效重建已另做源候选与联合目标预算必要条件检查，实际恢复策略、源可读性及IO仍未评估。`}];
   }
   const specs=data.componentSpecs,reserve=data.serverSizing.reserveRatio;
   return componentServerDefinitions.map(({key,label})=>{
@@ -1971,7 +2093,7 @@ function getRecoveryWorkspaceAudits(data) {
   const entries=data.reverse?[{key:"dn",label:"反推同构主机"}]:componentServerDefinitions;
   return entries.map(({key,label})=>{
     const d=getDiskCapacity(data.componentSpecs[key],data.reverse?data.reserveRatio:data.serverSizing.reserveRatio);
-    if(d.mode!=="net"||d.recoveryMode==="unknown") return {component:label,status:"恢复工作区未评估",text:`${label}：恢复工作区预算未评估；未从RAID热备或数据库副本推定工作区需求。整机失效后的副本迁移/重建空间、目标落位和RPO/RTO未评估。`};
+    if(d.mode!=="net"||d.recoveryMode==="unknown") return {component:label,status:"恢复工作区未评估",text:`${label}：恢复工作区预算未评估；未从RAID热备或数据库副本推定工作区需求。每主机工作区仍未评估；整机重建另见源候选/联合目标预算必要条件，真实恢复及RPO/RTO未评估。`};
     const description=d.recoveryMode==="none"?"声明无需额外工作区，新增扣减0TB":d.recoveryMode==="included"?`声明 ${round(d.recoveryTb)}TB 已含在临时预算 ${round(d.tempTb)}TB内，不重复扣减`:`每主机独立额外 ${round(d.recoveryTb)}TB，在文件系统后、水位前扣一次`;
     return {component:label,status:"工作区预算初算 / 恢复策略未验证",text:`${label}：${description}；净可用 ${round(d.usableTb)}TB。依据：${d.recoverySource}（用户声明，未核验）。仅计每主机工作区，不验证整机失效后的副本重建目标、并发开销、IO、恢复时长或RPO/RTO；不等于恢复可行。`};
   });
@@ -2397,7 +2519,14 @@ function parseDnGroupData(raw, tenant) {
 }
 
 function getDnGroupDataTb(tenant, group) {
-  return tenant.dnGroupDataTb?.[group-1] ?? tenant.futureDataTb / Math.max(1,tenant.shardCount);
+  if (tenant.dnGroupDataTb != null) {
+    const values = tenant.dnGroupDataTb;
+    // An explicit per-Group plan is authoritative; holes must never become uniform estimates.
+    if (!Array.isArray(values) || values.length !== tenant.shardCount
+      || !Array.from(values).every(value=>Number.isFinite(value)&&value>=0)) return NaN;
+    return values[group-1];
+  }
+  return tenant.futureDataTb / Math.max(1,tenant.shardCount);
 }
 
 function getRoleResourceDemand(role, tenantPlans, config = null) {
@@ -2422,7 +2551,9 @@ function getRoleResourceDemand(role, tenantPlans, config = null) {
     if (!canonical || !Number.isSafeInteger(tenant.shardCount) || dnRole.group > tenant.shardCount
       || !Number.isSafeInteger(tenant.replicasPerShard) || !Number.isSafeInteger(replica)
       || replica >= tenant.replicasPerShard) return unknown;
-    return { cpu: tenant.dnCores, memory: tenant.dnMemoryGb, disk: getDnGroupDataTb(tenant, dnRole.group), diskUnknown: tenant.storageDemandKnown === false };
+    const disk = getDnGroupDataTb(tenant, dnRole.group);
+    if (!Number.isFinite(disk) || disk < 0) return {...unknown, diskUnknown:true};
+    return { cpu: tenant.dnCores, memory: tenant.dnMemoryGb, disk, diskUnknown: tenant.storageDemandKnown === false };
   }
   if (isGtmRole(role)) return config && getGtmRolePlacements(config).some(item => item.label === role)
     ? { cpu: 4, memory: 8, disk: 0 } : unknown;
@@ -2431,11 +2562,26 @@ function getRoleResourceDemand(role, tenantPlans, config = null) {
   return unknown;
 }
 
+function withinResourceBudget(used, budget) {
+  if (![used,budget].every(value=>Number.isFinite(value)&&value>=0)) return false;
+  return used <= budget || used-budget <= 8*Number.EPSILON*Math.max(used,budget);
+}
+
 function getServerResourceAudit(server, config, extraDemand = null) {
   if (!server.spec) return null;
   const issues = [];
   const identities = new Set();
   const validDemand = demand => !demand.unknown && [demand.cpu,demand.memory,demand.disk].every(value=>Number.isFinite(value)&&value>=0);
+  const compensation = {cpu:0,memory:0,disk:0};
+  const addDemand = (total,demand) => {
+    for (const key of ["cpu","memory","disk"]) {
+      const adjusted = demand[key]-compensation[key];
+      const next = total[key]+adjusted;
+      compensation[key] = (next-total[key])-adjusted;
+      total[key] = next;
+    }
+    return total;
+  };
   const used = server.roles.reduce((total, role) => {
     const identity = role.replace(/-Slave$/, "-Slave1");
     if (identities.has(identity)) issues.push(`组件 ${role} 在同一服务器重复部署`);
@@ -2445,14 +2591,12 @@ function getServerResourceAudit(server, config, extraDemand = null) {
       issues.push(`组件 ${role} 的资源需求未知或非法`);
       return total;
     }
-    return { cpu: total.cpu + demand.cpu, memory: total.memory + demand.memory, disk: total.disk + demand.disk };
+    return addDemand(total,demand);
   }, { cpu: 0, memory: 0, disk: 0 });
   if (extraDemand) {
     if (!validDemand(extraDemand)) issues.push("待部署组件的资源需求未知或非法");
     else {
-      used.cpu += extraDemand.cpu;
-      used.memory += extraDemand.memory;
-      used.disk += extraDemand.disk;
+      addDemand(used,extraDemand);
     }
   }
   const usable = getUsableServerResources(server.spec,config.reserveRatio);
@@ -2468,7 +2612,7 @@ function getServerResourceAudit(server, config, extraDemand = null) {
     memoryPercent: Math.round((used.memory / server.spec.memoryGb) * 100),
     diskPercent: Math.round((used.disk / getDiskCapacity(server.spec,config.reserveRatio).dataTb) * 100),
     issues,
-    withinWatermark: issues.length===0 && used.cpu <= usable.cpu && used.memory <= usable.memory && used.disk <= usable.disk
+    withinWatermark: issues.length===0 && ["cpu","memory","disk"].every(key=>withinResourceBudget(used[key],usable[key]))
   };
 }
 
@@ -3569,7 +3713,7 @@ function buildReverseTenantPlans(data) {
       ? Math.max(requestedReplicas, data.minReplica)
       : requestedReplicas;
     const shardCount = isDistributed
-      ? maybeEven(Math.max(1, Number(spec.shardCount) || 1), true)
+      ? Math.max(1, Math.floor(Number(spec.shardCount) || 1))
       : 1;
     const cnPerAz = Math.max(1, Math.floor(Number(spec.cnPerAz) || 1));
     const dnInstances = shardCount * replicasPerShard;
@@ -3996,7 +4140,7 @@ function getLayoutFeasibilityAudits(data) {
     if(layout!==current && (roles>600 || estimated[layout]>600 || (data.reverse&&data.serverCount>600))) return {...row,reason:"比较规模上限：超过600个实例或600台候选服务器，仅保留数量估算；当前方案仍独立校验。"};
     try {
       const candidate=layout===current?data:buildLayoutCandidate(data,layout);
-      return {...row,...assessLayoutPlacement(candidate)};
+      return {...row,...assessLayoutPlacement(candidate),rebuild:getDnRebuildSummary(candidate)};
     } catch(error) {
       if (!(error instanceof PlanningInputError)) throw error;
       return {...row,reason:`候选计算未完成：${error.message}`};
@@ -4007,7 +4151,7 @@ function getLayoutFeasibilityAudits(data) {
 }
 
 function formatLayoutFeasibility(item) {
-  return `${item.label}${item.selected?"（当前）":""}：数量估算 ${item.estimatedServers} 台，资源总量下界 ${item.resourceLowerBoundServers} 台；${item.status}，${item.feasibleServers===null?"可行台数未确认":`已检查落位 ${item.feasibleServers} 台`}。${item.reason}`;
+  return `${item.label}${item.selected?"（当前）":""}：数量估算 ${item.estimatedServers} 台，资源总量下界 ${item.resourceLowerBoundServers} 台；${item.status}，${item.feasibleServers===null?"可行台数未确认":`已检查落位 ${item.feasibleServers} 台`}。${item.reason}${item.rebuild?` ${item.rebuild.text}`:""}`;
 }
 
 function renderLayoutFeasibility(data) {
@@ -4068,7 +4212,7 @@ function render(options = {}) {
   }
   renderTopology(data);
   const identitySummary = getPlanRoleIdentitySummary(data);
-  $("placementDetails").innerHTML = `<div class="${identitySummary.complete ? "cn-placement-ok" : "cn-placement-error"}">${escapeAttr(identitySummary.text)}</div>` + renderCnPlacementSummary(data)
+  $("placementDetails").innerHTML = `<div class="${identitySummary.complete ? "cn-placement-ok" : "cn-placement-error"}">${escapeAttr(identitySummary.text)}</div>` + renderCnPlacementSummary(data) + renderDnRebuildAudit(data)
     + `<div class="dn-failure-summary">${[...getDnFailureCoverage(data),...getDnTakeoverCapacity(data),...getDnHostPressure(data),...getPerformanceEvidence(data)].map(item=>`<div class="${item.error?"cn-placement-error":""}">${escapeAttr(item.text)}</div>`).join("")}</div>`;
   renderExcelExportSummary(data);
   renderRelationGraph(data);
@@ -4746,6 +4890,7 @@ function renderRisks(data) {
     .forEach(item => risks.push([item.error ? "risk-high" : "risk-mid", item.text]));
   getDnFailureCoverage(data).filter(item => item.missing.length)
     .forEach(item => risks.push([item.error ? "risk-high" : "risk-mid",item.text]));
+  risks.push(["risk-mid",getDnRebuildSummary(data).text]);
   getDnTakeoverCapacity(data).forEach(item=>risks.push([item.error?"risk-high":"risk-mid",item.text]));
   getDnHostPressure(data).filter(item=>item.error||!item.evaluated).forEach(item=>risks.push([item.error?"risk-high":"risk-mid",item.text]));
   data.tenantPlans.forEach((tenant) => {
@@ -4924,6 +5069,7 @@ function renderFormula(data) {
       ...getLayoutFeasibilityAudits(data).map(formatLayoutFeasibility),
       ...getStorageCapacityAudits(data).map(item=>item.text),
       ...getRecoveryWorkspaceAudits(data).map(item=>item.text),
+      getDnRebuildSummary(data).text,
       ...getDataHorizonAudits(data).map(item=>item.text)
     ].join("\n");
     return;
@@ -4977,6 +5123,7 @@ function renderFormula(data) {
     ...getLayoutFeasibilityAudits(data).map(formatLayoutFeasibility),
     ...getStorageCapacityAudits(data).map(item=>item.text),
     ...getRecoveryWorkspaceAudits(data).map(item=>item.text),
+      getDnRebuildSummary(data).text,
     ...getDataHorizonAudits(data).map(item=>item.text)
   ].join("\n");
   $("formulaOutput").textContent = text;
@@ -5002,6 +5149,7 @@ function renderReverseFormula(data) {
     ...getLayoutFeasibilityAudits(data).map(formatLayoutFeasibility),
     ...getStorageCapacityAudits(data).map(item=>item.text),
     ...getRecoveryWorkspaceAudits(data).map(item=>item.text),
+      getDnRebuildSummary(data).text,
     ...getDataHorizonAudits(data).map(item=>item.text),
     ...(data.centerQuotaAudit || []).map(site => `${site.az} 配额：需求 ${site.required} / 现有 ${site.available} / 已分配 ${site.assigned} / 缺口 ${site.missing} 台`),
     `当前按服务器序号轮转到各中心；满足上述中心配额需要总数至少 ${data.requiredServerCount} 台，未自动增加客户输入机器。`,
@@ -6695,6 +6843,8 @@ function buildExcelSheets(data) {
   getLayoutFeasibilityAudits(data).forEach(item=>summaryRows.push(["组件组合落位核验",item.status,formatLayoutFeasibility(item)]));
   getStorageCapacityAudits(data).forEach(item=>summaryRows.push(["磁盘容量核对 / "+item.component,item.status,item.text]));
   getRecoveryWorkspaceAudits(data).forEach(item=>summaryRows.push(["恢复工作区预算 / "+item.component,item.status,item.text]));
+  summaryRows.push(["DN整机重建必要条件", "未评估", getDnRebuildSummary(data).text]);
+  getDnRebuildAudits(data).forEach(item=>summaryRows.push(["DN整机重建逐故障",item.placementStatus,item.text]));
   getDataHorizonAudits(data).forEach(item=>summaryRows.push(["数据时点与三年参考 / "+item.component,item.status,item.text]));
   if (data.environment === "poc") {
     summaryRows.push(["POC 实例密度", data.resourceReduction.densityEnabled ? "启用" : "关闭",
@@ -6887,6 +7037,7 @@ function buildExcelSheets(data) {
       `实际 ${group.actual} / 应有 ${group.expected}；身份有效 ${valid} / ${group.expected}；仅核对数量与身份，水位另行校验；同 Group 副本必须跨物理服务器`
     ]);
   });
+  getDnRebuildAudits(data).forEach(item=>riskRows.push(["DN整机重建",item.placementError?"提示":"未评估",item.host||"整体方案",item.text]));
   const riskSheet = buildExcelTableSheet({
     name: "风险水位",
     title: "生产红线、资源水位与副本完整性",
@@ -7143,6 +7294,12 @@ async function renderElementToPng(target) {
     warning.textContent = "实例身份或落位校验未通过：本图仅供排查，不可作为可用部署方案。详见计算过程与风险校验。";
     warning.style.cssText = "color:#ffb4b4;background:#341c1c;border-left:4px solid #ff6262;padding:12px;margin-bottom:12px;font-size:16px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
     layoutClone.prepend(warning);
+  }
+  if (latestDesignData) {
+    const note = document.createElement("div");
+    note.textContent = getDnRebuildSummary(latestDesignData).text;
+    note.style.cssText = "color:#ead6a4;background:#24271c;padding:10px;margin-bottom:10px;font-size:14px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
+    layoutClone.prepend(note);
   }
   layoutClone.style.width = `${preferredWidth}px`;
   layoutClone.style.minWidth = `${preferredWidth}px`;
