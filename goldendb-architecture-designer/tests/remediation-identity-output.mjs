@@ -7,6 +7,8 @@ const browser=await chromium.launch({channel:'chrome',headless:true}),page=await
 page.on('pageerror',e=>errors.push(e.message));
 try {
  await page.goto('file://'+path.resolve('goldendb-architecture-designer/index.html'));
+ // Isolate identity warnings from the separate replica-policy gate.
+ await page.evaluate(()=>{businessTenantSpecs.forEach(t=>t.replicaCount=6);render();});
  results.push(...await page.evaluate(()=>{
   const r=[],check=(name,pass)=>r.push({name,pass});
   const base=structuredClone(latestDesignData),bad=structuredClone(base),hosts=getPlanServers(bad);

@@ -52,6 +52,13 @@
             </label>
           </div>
 
+          <div class="gtm-planning-controls">
+            <label class="field"><span>规划用途</span><select id="planningPurpose"><option value="new">新建／重新规划（默认）</option><option value="expansion">现有集群扩容对比（仅诊断）</option></select></label>
+            <div class="gtm-baseline-actions"><button id="captureGtmBaselineBtn" class="ghost-btn" type="button">保存当前方案为工具基线</button><button id="clearGtmBaselineBtn" class="ghost-btn" type="button">清除工具基线</button><button id="exportGtmComparisonBtn" class="ghost-btn" type="button">导出GTM对比记录</button></div>
+            <p id="gtmBaselineStatus" class="field-help">尚未保存本模块工具基线。</p>
+            <p class="field-help">基线仅为本页会话的规划快照，不是现网核验。两模块分别保存；刷新或全部重置会清除。记录可导出存档，暂不支持导入恢复。扩容对比时已有基线锁定；需替换请先切回新建重算。扩容对比不会锁定旧绑定或物理落位，不能直接作为实施方案。</p>
+          </div>
+
           <section id="businessParams" class="parameter-section">
             <label class="field">
               <span>部署方式</span>
@@ -348,11 +355,11 @@
             </label>
 
             <label class="field">
-              <span>设计目标</span>
+              <span>评分偏好（仅调整权重，不调整数量/落位）</span>
               <select id="reverseGoal">
-                <option value="balanced" selected>均衡推荐</option>
-                <option value="performance">性能优先</option>
-                <option value="availability">可用性优先</option>
+                <option value="balanced" selected>均等权重</option>
+                <option value="performance">计算数量项优先</option>
+                <option value="availability">副本/共宿项优先</option>
               </select>
             </label>
 
@@ -629,7 +636,7 @@
           </div>
 
           <div id="reversePlanBlock" class="output-block hidden">
-            <h3>资源反推最优方案</h3>
+            <h3>资源反推参考方案</h3>
             <div id="reversePlan" class="reverse-plan"></div>
           </div>
 

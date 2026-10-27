@@ -118,9 +118,9 @@ const environmentLabels = {
 };
 
 const goalLabels = {
-  balanced: "均衡推荐",
-  performance: "性能优先",
-  availability: "可用性优先"
+  balanced: "均等权重",
+  performance: "计算数量项优先",
+  availability: "副本/共宿项优先"
 };
 
 const serverProfileLabels = {
@@ -260,6 +260,7 @@ let nextTenantIdentity = 1;
 let businessTenantSpecs = cloneTenantSpecs(defaultBusinessTenants);
 let reverseTenantSpecs = cloneTenantSpecs(defaultReverseTenants);
 let latestDesignData = null;
+const gtmPlanningContexts = {business:{intent:"new",baseline:null},reverse:{intent:"new",baseline:null}};
 const planActionIds = ["copyBtn", "downloadExcelBtn", "downloadTopologyBtn", "downloadServerTopologyBtn"];
 const planningLimits = Object.freeze({ tenants: 100, instances: 2000, servers: 2000 });
 
@@ -371,6 +372,7 @@ function syncPlanActionAvailability() {
 }
 
 function invalidatePlanningResult(messages) {
+  $("captureGtmBaselineBtn").disabled=true;$("exportGtmComparisonBtn").disabled=true;
   latestDesignData = null;
   const message = `参数未通过，当前方案已失效。${messages.join("；")}`;
   $("planningInputStatus").hidden = false;
@@ -796,7 +798,6 @@ function calculateReverse() {
   const requestedReplicas = Math.min(...tenantPlans.map((tenant) => tenant.requestedReplicas));
   const replicasPerShard = Math.max(...tenantPlans.map((tenant) => tenant.replicasPerShard));
   const shardCount = tenantPlans.reduce((sum, tenant) => sum + tenant.shardCount, 0);
-  const dnInstances = shardCount * replicasPerShard;
   const actualDnInstances = tenantPlans.reduce((sum, tenant) => sum + tenant.dnInstances, 0);
   const managementNodes = integerValue("reverseManagementNodes", 1);
   const recommendedManagementNodes = getRecommendedManagementNodes(environment, mode);
@@ -2622,17 +2623,95 @@ function canPlaceRoleWithinWatermark(server, role, config) {
   return audit?.withinWatermark === true;
 }
 
+// Tool planning policy only: replica floors and linear DN limits are not vendor certification.
+function getTenantPlanningAudits(data) {
+  const audits = [];
+  for (const tenant of data.tenantPlans) {
+    const key = getTenantKey(tenant), name = displayTenantKey(key, data.tenantPlans);
+    const baseline = data.reverse ? getMinimumReplicaCount(data.environment, data.mode)
+      : getReplicaCount(data.mode, tenant.isDistributed ? "distributed" : "centralized", data.environment);
+    const low = tenant.replicasPerShard < baseline;
+    const adjusted = tenant.requestedReplicas !== tenant.replicasPerShard;
+    const error = data.environment === "production" && tenant.replicasPerShard < 2;
+    audits.push({tenant:key,kind:"副本规划",error,status:error?"未通过":low?(data.environment==="production"?"未评估":"提示"):adjusted?"提示":"通过",
+      text:`${name} 副本规划：输入 ${tenant.requestedReplicas} / 实际 ${tenant.replicasPerShard} / 当前工具${data.environment==="production"?"生产":"POC"}规划基线 ${baseline} 副本。${adjusted?"已按既有反推规则修正，后续数量和落位均按实际副本计算。":"保留手工数量。"}${low?(error?"仅有1个在线副本，任一DN宿主机故障会失去该Group全部在线副本；当前生产故障冗余结构未通过，请补充副本并核验故障域。":data.environment==="production"?"低于工具参考基线，版本、故障域、仲裁及恢复方案未评估，不能确认生产可用；建议值不等于厂商准入下限，需专项评审。":"低于工具参考基线，仅作POC验证提示；生产须另评审。") : "基线数量满足只表示工具数量规则通过。"}该基线不是厂商通用最小副本要求，不证明多数派、选主、RPO/RTO。`});
+    if (!tenant.isDistributed) {
+      const known = !data.reverse && [tenant.shardByCapacity,tenant.shardByTps].every(Number.isFinite);
+      const over = known && (tenant.shardByCapacity > 1 || tenant.shardByTps > 1);
+      const error = data.environment === "production" && over;
+      audits.push({tenant:key,kind:"集中式单分片",error,status:!known?"未评估":error?"未通过":over?"提示":"通过",
+        text:`${name} 集中式单分片：${known?`容量初算需要 ${tenant.shardByCapacity} Group，性能初算需要 ${tenant.shardByTps} Group，当前固定 1 Group。${over?(error?"超出当前单分片初算边界，不能作为可用生产部署；请调整架构/需求或补充匹配机型、版本、SQL与并发模型的有效标定后重新计算。":"超出初算边界，仅可作为POC待验证目标，不能承诺实际承载。") : "未超过当前单分片初算边界，仍需匹配环境压测。"}`:"反推未录入业务吞吐目标和匹配DN性能标定，不能从服务器充足推断集中式性能满足；已录入磁盘需求与落位另验。"}线性模型不是实测性能或生产认证。`});
+    }
+  }
+  return audits;
+}
+
+function getTenantPlanningSummary(data) {
+  const audits=getTenantPlanningAudits(data);
+  return `租户规划门禁：阻断 ${audits.filter(a=>a.error).length} 项，未评估 ${audits.filter(a=>a.status==="未评估").length} 项，提示 ${audits.filter(a=>a.status==="提示").length} 项；数量基线和性能初算均不代表生产认证。`;
+}
+
+function renderTenantPlanningAudits(data) {
+  return `<div class="tenant-planning-summary"><h4>租户规划门禁</h4>${getTenantPlanningAudits(data).map(a=>`<div class="${a.error?"cn-placement-error":""}">${escapeAttr(a.status+"："+a.text)}</div>`).join("")}</div>`;
+}
+
 function getServerAuditStatus(server) {
   const audit = server.resourceAudit;
-  if (!server.spec || !audit) return {status:"未评估", detail:"缺少服务器规格或资源审计，不能确认可用容量"};
-  if (audit.issues?.length) return {status:"未通过", detail:audit.issues.join("；")};
-  if (audit.withinWatermark !== true) return {status:"未通过", detail:"资源水位未通过，请核对单机容量及组件需求"};
-  if (audit.diskDemandUnknown) return {status:"部分未评估", detail:"已录入资源水位未超限，但存在未提供数据需求的DN，不能确认完整磁盘承载"};
-  return {status:"通过", detail:"资源水位算式通过，非性能或高可用认证"};
+  const occupied = Boolean(server.roles?.length);
+  const state = (status,detail,severity="note") => ({status,detail,severity,blocksDeployment:severity==="blocking"});
+  const metricsKnown = audit && [audit.cpuPercent,audit.memoryPercent,audit.diskPercent].every(Number.isFinite);
+  if (!occupied) {
+    if (!server.spec) return state("预留待配置","当前无组件、规格未配置；不能计入已确认的备用或重建容量，需另核目标机房/资源池及适配。");
+    if (!audit || !metricsKnown || audit.issues?.length || audit.withinWatermark!==true
+      || audit.diskDemandUnknown || ![audit.cpuPercent,audit.memoryPercent,audit.diskPercent].every(value=>value===0)
+      || !audit.used || ![audit.used.cpu,audit.used.memory,audit.used.disk].every(value=>value===0)) {
+      return state("预留未评估","当前无组件，但资源审计缺失、无效或与空闲状态不符；不能确认备用或重建容量。");
+    }
+    return state("空闲预留","已配置规格且当前无组件，零水位仅为规划账本；接管/重建仍需核验机房、资源池、反亲和和联合资源预算。");
+  }
+  if (!server.spec || !audit) return state("未评估","缺少服务器规格或资源审计，不能确认可用容量","blocking");
+  if (audit.issues?.length) return state("未通过",audit.issues.join("；"),"blocking");
+  if (audit.withinWatermark === false) return state("未通过","资源水位未通过，请核对单机容量及组件需求","blocking");
+  if (audit.withinWatermark !== true || !metricsKnown) return state("未评估","资源审计或水位数值不完整，不能确认部署通过","blocking");
+  if (audit.diskDemandUnknown) return state("部分未评估","已录入资源水位未超限，但存在未提供数据需求的DN，不能确认完整磁盘承载");
+  return state("通过","资源水位算式通过，非性能或高可用认证","pass");
+}
+
+function getServerResourceDisplay(server) {
+  const state = getServerAuditStatus(server), audit = server.resourceAudit;
+  const known = Boolean(server.spec && audit && !audit.issues?.length
+    && (server.roles?.length || state.status==="空闲预留"));
+  const value = key => known && Number.isFinite(audit[key]) ? audit[key] : "未评估";
+  return {state,cpu:value("cpuPercent"),memory:value("memoryPercent"),
+    disk:known && audit.diskDemandUnknown ? "未评估（仅计已录入部分）" : value("diskPercent")};
+}
+
+function formatResourcePercent(value) {
+  return typeof value === "number" ? `${value}%` : value;
+}
+
+function formatServerCpuLoad(server) {
+  return formatResourcePercent(getServerResourceDisplay(server).cpu);
 }
 
 function formatServerDiskLoad(server) {
-  return server.resourceAudit?.diskDemandUnknown ? "未评估（仅计已录入部分）" : `${server.diskLoad}%`;
+  return formatResourcePercent(getServerResourceDisplay(server).disk);
+}
+
+function formatServerResourceSummary(server) {
+  const view=getServerResourceDisplay(server);
+  return `CPU ${formatResourcePercent(view.cpu)} · 磁盘 ${formatResourcePercent(view.disk)} · ${view.state.status}`;
+}
+
+function getReserveHostSummary(data) {
+  const empty=getPlanServers(data).filter(server=>!server.roles.length);
+  const counts=Object.fromEntries(["预留待配置","预留未评估","空闲预留"].map(status=>[status,empty.filter(h=>getServerAuditStatus(h).status===status).length]));
+  return {count:empty.length,counts,text:`预留主机状态：无组件${empty.length}台，其中规格待配置${counts["预留待配置"]}、审计未评估${counts["预留未评估"]}、已配置空闲${counts["空闲预留"]}。未配置/未评估主机不计入已确认备用或重建容量；已配置空闲也不保证可接管，仍需目标机房/资源池、反亲和、联合预算和真实恢复验证。`};
+}
+
+function renderReserveHostSummary(data) {
+  const summary=getReserveHostSummary(data);
+  return summary.count ? `<div class="reserve-host-summary"><h4>预留主机状态</h4><p>${escapeAttr(summary.text)}</p></div>` : "";
 }
 
 function getInstanceFitIssues(data) {
@@ -3509,8 +3588,92 @@ function scoreReversePlan(data) {
   return { performance, availability, capacity, weighted };
 }
 
+// Existing score formulas are heuristic preference indicators, not acceptance or measured metrics.
+function getReverseScoreSummary(data) {
+  const weights=data.goal==="performance"?[0.5,0.25,0.25]:data.goal==="availability"?[0.25,0.5,0.25]:[1/3,1/3,1/3];
+  const weightText=data.goal==="balanced"?"三项各1/3":"计算数量/副本共宿/库存余量权重 "+weights.map(w=>`${w*100}%`).join(" / ");
+  const redlineCount=getResourceReductionRedlines(data).length;
+  const status=redlineCount?"仅供诊断":"仅供偏好比较";
+  const label=`启发式参考分 ${data.scores.weighted}/100 · 部署红线 ${redlineCount} 项 · ${status}`;
+  return {weights,weightText,redlineCount,blocked:redlineCount>0,status,label,
+    text:`${label}；${weightText}。评分偏好只改变加权显示，不自动调整数量、规格或落位，也未搜索全局最优。计算数量项 ${data.scores.performance}、副本/共宿项 ${data.scores.availability}、库存余量项 ${data.scores.capacity}；不是实测TPS、可用率或容量认证，不能抵销红线，未触发红线也不代表生产已验证。`};
+}
+
+function getReverseScoreFormula(data) {
+  const base=data.serverPlan.some(s=>s.dnCount>1&&data.environment==="production")?72:88;
+  const pPenalty=data.resourceState==="不足"?30:0,aPenalty=data.allowColocation&&data.environment==="production"?18:0,cPenalty=data.resourceState==="临界"?12:0;
+  return `旧启发式计算式（保留原数值）：P=截断0..100(ROUND(65+${data.cnPerAz}×6+${data.shardCount}×2-${pPenalty}))=${data.scores.performance}；A=截断0..100(ROUND(${base}+最大副本${data.replicasPerShard}×4-${aPenalty}))=${data.scores.availability}；C=截断0..100(ROUND(80+MIN(12,${data.serverCount}-${data.requiredServerCount})×2-${cPenalty}))=${data.scores.capacity}；按评分偏好加权后ROUND=${data.scores.weighted}。这些数量规则不验证实际性能、选主或恢复能力。`;
+}
+
 function clampScore(value) {
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function getGtmPlanningModule(data) { return data.reverse ? "reverse" : "business"; }
+
+function takeGtmPlanningSnapshot(data) {
+  return {schemaVersion:1,module:getGtmPlanningModule(data),source:"当前工具规划快照，未经现网核验",environment:data.environment,mode:data.mode,
+    kind:data.gtmBinding.kind,groupCount:data.gtmBinding.groupCount,gtmNodes:data.gtmNodes,
+    tenants:data.tenantPlans.map(t=>({tenantId:getTenantKey(t),name:t.name,
+      binding:!t.isDistributed||data.gtmBinding.kind==="none"?"不在GTM主路径":data.gtmBinding.kind==="dedicated"?`专属:${getTenantKey(t)}`:"共享:GTM-SYS",
+      replicas:t.isDistributed&&data.gtmBinding.kind!=="none"?data.gtmReplicasPerGroup:0,pool:getTenantResourcePoolKey(t)})),
+    placements:getPlanServers(data).flatMap(h=>h.roles.filter(isGtmRole).map(role=>({role,serverId:h.id,az:h.az,pool:h.tenantPool})))};
+}
+
+function getGtmExpansionAudit(data) {
+  const context=gtmPlanningContexts[getGtmPlanningModule(data)];
+  if (context.intent==="new") return {enabled:false,blocking:false,status:"新建重算",rows:[],text:"当前按新建方案重新规划，不表示保留现网绑定或落位。"};
+  const baseline=context.baseline;
+  const limit="仅比较工具快照，未核验现网配置，也未锁定已有组件物理落位；不能作为可直接实施的现网增量扩容方案。";
+  if (!baseline || baseline.module!==getGtmPlanningModule(data)) return {enabled:true,blocking:true,status:"未评估",rows:[],text:`扩容对比未评估：缺少本模块有效规划基线。请先保存原方案的工具快照再比较；${limit}`};
+  const current=takeGtmPlanningSnapshot(data),old=new Map(baseline.tenants.map(t=>[t.tenantId,t])),now=new Map(current.tenants.map(t=>[t.tenantId,t]));
+  const rows=[...new Set([...old.keys(),...now.keys()])].map(id=>{
+    const before=old.get(id),after=now.get(id),fields=before&&after?[...["binding","replicas","pool"].filter(k=>before[k]!==after[k])]:[];
+    return {tenantId:id,name:after?.name||before?.name,beforeBinding:before?.binding??"无（新增）",afterBinding:after?.binding??"无（移除）",
+      beforeReplicas:before?.replicas??0,afterReplicas:after?.replicas??0,beforePool:before?.pool??"无",afterPool:after?.pool??"无",
+      status:!before?"新增":!after?"移除":fields.length?"既有配置变化":"绑定/资源池未变",changed:!!before&&(!after||fields.length>0),fields};
+  });
+  const currentPlacements=new Map(current.placements.map(p=>[p.role,p]));
+  const moves=baseline.placements.filter(p=>{const after=currentPlacements.get(p.role);return after&&(after.serverId!==p.serverId||after.az!==p.az||after.pool!==p.pool);});
+  const changed=rows.filter(r=>r.changed).length,added=rows.filter(r=>r.status==="新增").length,removed=rows.filter(r=>r.status==="移除").length;
+  const topology=baseline.mode!==current.mode||baseline.environment!==current.environment?"环境或拓扑发生变化。":"";
+  return {enabled:true,blocking:true,status:changed?"检测到既有配置变化":"仅供扩容诊断",rows,changed,added,removed,movedRoles:moves.length,
+    baselineSource:baseline.source,text:`扩容对比（诊断）：已有配置变化/移除 ${changed} 个租户，新增 ${added}，移除 ${removed}；GTM Group ${baseline.groupCount}→${current.groupCount}，实例 ${baseline.gtmNodes}→${current.gtmNodes}；相同GTM角色的工具Server编号/中心/池落位差异 ${moves.length} 个（编号不是现网主机证明）。${topology}${limit}`};
+}
+
+function getGtmExpansionLines(data) {
+  const audit=getGtmExpansionAudit(data);
+  return audit.enabled?[audit.text,...audit.rows.map(r=>`${r.name} [${r.tenantId}] ${r.status}：${r.beforeBinding}→${r.afterBinding}；副本 ${r.beforeReplicas}→${r.afterReplicas}；资源池 ${r.beforePool}→${r.afterPool}`)]:["规划用途：新建／重新规划，按全体租户重算；不表示保留现网绑定或物理落位。"];
+}
+
+function renderGtmExpansionAudit(data) {
+  const audit=getGtmExpansionAudit(data);
+  return audit.enabled?`<div class="gtm-expansion-summary"><h4>GTM扩容对比（诊断）</h4>${getGtmExpansionLines(data).map(line=>`<div class="cn-placement-error">${escapeAttr(line)}</div>`).join("")}</div>`:"";
+}
+
+function syncGtmComparisonControls() {
+  const module=$("designModule").value,context=gtmPlanningContexts[module];
+  $("planningPurpose").value=context.intent;
+  $("gtmBaselineStatus").textContent=context.baseline?`已有本模块工具基线：${context.baseline.tenants.length}租户 / ${context.baseline.groupCount} GTM Group；未经现网核验。`:"尚未保存本模块工具基线。";
+  const valid=latestDesignData&&getGtmPlanningModule(latestDesignData)===module;
+  $("captureGtmBaselineBtn").disabled=!valid||(context.intent!=="new"&&!!context.baseline);$("exportGtmComparisonBtn").disabled=!valid;$("clearGtmBaselineBtn").disabled=!context.baseline;
+  $("captureGtmBaselineBtn").textContent=context.baseline?(context.intent!=="new"?"扩容对比中基线已锁定":"用当前方案替换工具基线"):"保存当前方案为工具基线";
+}
+
+function captureGtmComparisonBaseline() {
+  const data=getCurrentPlanForAction();if(!data)return;
+  const context=gtmPlanningContexts[getGtmPlanningModule(data)];
+  if(context.intent!=="new"&&context.baseline)return;
+  const snapshot=takeGtmPlanningSnapshot(data);snapshot.capturedAt=new Date().toISOString();
+  gtmPlanningContexts[getGtmPlanningModule(data)].baseline=snapshot;render();
+}
+
+function exportGtmComparisonRecord() {
+  const data=getCurrentPlanForAction();if(!data)return;
+  const module=getGtmPlanningModule(data),context=gtmPlanningContexts[module];
+  const record={schemaVersion:1,module,purpose:context.intent,source:"工具会话规划记录；仅存档，不是现网配置或可执行迁移方案",baseline:context.baseline,current:takeGtmPlanningSnapshot(data),audit:getGtmExpansionAudit(data)};
+  const url=URL.createObjectURL(new Blob([JSON.stringify(record,null,2)],{type:"application/json"})),link=document.createElement("a");
+  link.href=url;link.download=`GoldenDB-GTM扩容对比-${module}.json`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
 function getGtmBinding(shape, distributedTenants, mode) {
@@ -4159,6 +4322,7 @@ function renderLayoutFeasibility(data) {
 }
 
 function render(options = {}) {
+  syncGtmComparisonControls();
   const shouldRenderTenantEditors = options.tenantEditors !== false;
   syncParameterPanels();
   syncDnCalibrationFields();
@@ -4191,6 +4355,7 @@ function render(options = {}) {
     return;
   }
   latestDesignData = data;
+  syncGtmComparisonControls();
   $("planningInputStatus").hidden = true;
   $("planningInputStatus").textContent = "";
   syncPlanActionAvailability();
@@ -4212,7 +4377,7 @@ function render(options = {}) {
   }
   renderTopology(data);
   const identitySummary = getPlanRoleIdentitySummary(data);
-  $("placementDetails").innerHTML = `<div class="${identitySummary.complete ? "cn-placement-ok" : "cn-placement-error"}">${escapeAttr(identitySummary.text)}</div>` + renderCnPlacementSummary(data) + renderDnRebuildAudit(data)
+  $("placementDetails").innerHTML = `<div class="${identitySummary.complete ? "cn-placement-ok" : "cn-placement-error"}">${escapeAttr(identitySummary.text)}</div>` + renderCnPlacementSummary(data) + renderDnRebuildAudit(data) + renderReserveHostSummary(data) + renderTenantPlanningAudits(data) + renderGtmExpansionAudit(data)
     + `<div class="dn-failure-summary">${[...getDnFailureCoverage(data),...getDnTakeoverCapacity(data),...getDnHostPressure(data),...getPerformanceEvidence(data)].map(item=>`<div class="${item.error?"cn-placement-error":""}">${escapeAttr(item.text)}</div>`).join("")}</div>`;
   renderExcelExportSummary(data);
   renderRelationGraph(data);
@@ -4728,13 +4893,20 @@ function getDeploymentArchitectureText(sizing) {
   return `CN ${sizing.cnServers} 台 + DN ${sizing.dnServers} 台 + GTM ${sizing.gtmServers} 台 + 管理 ${sizing.managementServers} 台`;
 }
 
+// Aggregate DN instances by tenant; the maximum replica count is only a displayed maximum.
+function formatDnInstanceSummary(data) {
+  const terms=data.tenantPlans.map(t=>`${displayTenantKey(getTenantKey(t),data.tenantPlans)} ${t.shardCount}×${t.replicasPerShard}`);
+  const total=data.tenantPlans.reduce((sum,t)=>sum+t.shardCount*t.replicasPerShard,0);
+  return `逐租户 SUM(Group × 副本) = ${terms.join(" + ")} = ${total} 个DN实例`;
+}
+
 function renderNodePlan(data) {
   const rows = data.reverse ? [
     ["设计模式", `${environmentLabels[data.environment]} · ${goalLabels[data.goal]} · ${data.componentLayoutLabel}`],
     ["服务器资源", `${data.serverCount} 台 ${getServerTypeLabel(data.serverType)}，每台 ${data.cpuCores}C/${data.memoryGb}GB/${data.diskTb}TB，预留 ${round(data.reserveRatio * 100)}%。`],
     ["CN 计算节点", `每 AZ ${data.cnPerAz} 个，总计 ${data.totalCn} 个；${data.environment === "production" ? "同一租户按一机一 CN 反亲和部署" : `单机最多 ${data.maxCnPerServer} 个 CN`}。`],
     ["CN 租户部署", `${data.resourceReduction.cnTenantPlacementLabel}；${data.resourceReduction.configuredCnTenantPlacement === "auto" ? "由环境自动选择" : "用户手工指定"}。`],
-    ["DN 数据节点", `${data.shardCount} 个分片 × ${data.replicasPerShard} 副本 = ${data.dnInstances} 个 DN 实例；单机最多 ${data.maxDnPerServer} 个 DN。`],
+    ["DN 数据节点", `${formatDnInstanceSummary(data)}；Group总数 ${data.shardCount}，最大每Group副本 ${data.replicasPerShard}（最大值不参与总数相乘）；单机最多 ${data.maxDnPerServer} 个 DN。`],
     ["DN 租户部署", `${data.resourceReduction.dnTenantPlacementLabel}；单机同租户上限 ${data.resourceReduction.maxTenantDnPerServer}，同一 Group 副本强制跨主机。`],
     ["GTM", `${data.gtmBinding.label}；${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 个 GTM 实例${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}。`],
     ["GTM 部署亲和", `${data.gtmAffinityLabel}；${data.componentSizing.note}`],
@@ -4744,7 +4916,7 @@ function renderNodePlan(data) {
   ] : [
     ["CN 计算节点", `按单租户、单 AZ 独立满足性能后汇总：${data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} ${tenant.cnPerAz}/生产AZ${tenant.cnManual ? "（手工）" : "（自动）"}`).join("；")}；跨站点总计 ${data.totalCn} 个。${data.environment === "production" ? "同一租户按一机一 CN 反亲和部署。" : ""}`],
     ["CN 租户部署", `${data.resourceReduction.cnTenantPlacementLabel}；${data.resourceReduction.configuredCnTenantPlacement === "auto" ? "由环境自动选择" : "用户手工指定"}。`],
-    ["DN 数据节点", `租户分片汇总 ${data.shardCount} 个 Group，副本实例合计 ${data.dnInstances} 个 DN；${data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 为 1 主 + ${Math.max(0, tenant.replicasPerShard - 1)} 从`).join("，")}。`],
+    ["DN 数据节点", `${formatDnInstanceSummary(data)}；租户分片汇总 ${data.shardCount} 个 Group，副本实例合计 ${data.dnInstances} 个 DN；${data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 为 1 主 + ${Math.max(0, tenant.replicasPerShard - 1)} 从`).join("，")}。`],
     ["DN 规格公式", data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} ${tenant.dnSpecLabel}：${tenant.dnSpecFormula}`).join("；")],
     ["DN 租户部署", `${data.resourceReduction.dnTenantPlacementLabel}；单机同租户上限 ${data.resourceReduction.maxTenantDnPerServer}，同一 Group 副本强制跨主机。`],
     ["GTM", data.shape === "distributed" ? `${data.gtmBinding.label}；${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 个 GTM 实例${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}。` : "集中式单分片事务通常不把 GTM 作为主路径。"],
@@ -4780,6 +4952,9 @@ function getDisasterText(mode) {
 
 function renderRisks(data) {
   const risks = getDnPlacementIssues(data).map(issue => ["risk-high", issue]);
+  if(getGtmExpansionAudit(data).enabled) risks.push(["risk-high",getGtmExpansionAudit(data).text]);
+  if (data.reverse) risks.push([getReverseScoreSummary(data).blocked?"risk-high":"risk-mid",getReverseScoreSummary(data).text]);
+  getTenantPlanningAudits(data).filter(a=>a.status!=="通过").forEach(a=>risks.push([a.error?"risk-high":"risk-mid",a.text]));
   getPerformanceEvidence(data).forEach(item=>risks.push(["risk-mid",item.text]));
   (data.centerQuotaAudit || []).filter(site => site.missing).forEach(site => risks.push([
     "risk-high", `${site.az} 主机配额不足：需要 ${site.required} 台，当前 ${site.available} 台，已分配 ${site.assigned} 台；不能借用其他中心主机抵消缺口。`
@@ -4794,7 +4969,7 @@ function renderRisks(data) {
       risks.push(["risk-ok", "本地单机房模式适合 POC、功能验证和演示环境，可用较少服务器快速搭建。"]);
     }
     if (data.resourceState === "不足") {
-      risks.push(["risk-high", `服务器不足：当前 ${data.serverCount} 台，按 ${goalLabels[data.goal]} 至少建议 ${data.requiredServerCount} 台。`]);
+      risks.push(["risk-high", `服务器不足：当前 ${data.serverCount} 台，按当前配置与装箱估算至少建议 ${data.requiredServerCount} 台；评分偏好不改变该数量。`]);
     } else if (data.resourceState === "临界") {
       risks.push(["risk-mid", "资源处于临界状态：扣除预留资源后接近最低部署要求，生产建议扩容或降低分片/副本密度。"]);
     } else {
@@ -4842,9 +5017,7 @@ function renderRisks(data) {
     if (data.gtmAffinity === "tenantPool" && data.environment === "production") {
       risks.push(["risk-high", "GTM 随 CN/DN/管理组件全混布会扩大事务控制面的故障影响，生产核心系统不建议采用。"]);
     }
-    if (data.requestedReplicas < getMinimumReplicaCount(data.environment, data.mode)) {
-      risks.push(["risk-mid", `输入副本数为 ${data.requestedReplicas}，已按 ${environmentLabels[data.environment]} 和部署方式修正为 ${data.replicasPerShard} 副本。`]);
-    }
+
     if (data.serverPlan.some((server) => server.diskLoad >= 90)) {
       risks.push(["risk-mid", "部分服务器 DN 密度较高，磁盘或 IO 可能成为瓶颈，建议降低单机 DN 上限或增加服务器。"]);
     }
@@ -4890,6 +5063,7 @@ function renderRisks(data) {
     .forEach(item => risks.push([item.error ? "risk-high" : "risk-mid", item.text]));
   getDnFailureCoverage(data).filter(item => item.missing.length)
     .forEach(item => risks.push([item.error ? "risk-high" : "risk-mid",item.text]));
+  if (getReserveHostSummary(data).count) risks.push(["risk-mid",getReserveHostSummary(data).text]);
   risks.push(["risk-mid",getDnRebuildSummary(data).text]);
   getDnTakeoverCapacity(data).forEach(item=>risks.push([item.error?"risk-high":"risk-mid",item.text]));
   getDnHostPressure(data).filter(item=>item.error||!item.evaluated).forEach(item=>risks.push([item.error?"risk-high":"risk-mid",item.text]));
@@ -4897,15 +5071,10 @@ function renderRisks(data) {
     if (tenant.cnBelowMinimum && !tenant.cnWorkloads) {
       risks.push(["risk-high", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 每生产 AZ ${tenant.cnPerAz} 个 CN，最终规格安全能力 ${round(tenant.cnSafeTpsPerAz)} TPS，目标 ${round(tenant.cnTargetTps)} TPS；未满足性能目标或当前至少 2 个 CN 的冗余规则，请增加节点或调整标定规格。`]);
     }
-    if (tenant.shardBelowMinimum) {
+    if (tenant.shardBelowMinimum && tenant.isDistributed) {
       risks.push(["risk-high", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 手工设置 ${tenant.shardCount} 个 DN Group，低于容量/TPS 水位建议的 ${tenant.recommendedShardCount} 个；请增加 Group 或用同机型 POC 证明可承载。`]);
     }
-    if (!tenant.isDistributed && (tenant.shardByCapacity > 1 || tenant.shardByTps > 1)) {
-      risks.push(["risk-mid", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 当前为集中式/单分片，但容量口径需要 ${tenant.shardByCapacity} 分片、TPS 口径需要 ${tenant.shardByTps} 分片；建议评估改为分布式，或以单机 POC 证明集中式可承载。`]);
-    }
-    if (tenant.replicasPerShard < tenant.recommendedReplicas) {
-      risks.push(["risk-mid", `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 手动设置 ${tenant.replicasPerShard} 副本（1 主 + ${Math.max(0, tenant.replicasPerShard - 1)} 从），低于当前环境建议的 ${tenant.recommendedReplicas} 副本；POC 可简化，生产需评估故障域、RPO/RTO 和多数派策略。`]);
-    }
+
   });
   if (data.growthFactor === 1 && data.years > 1) {
     risks.push(["risk-mid", "规划年限大于 1 但数据增长系数为 1，请确认是否无需容量增长预留。"]);
@@ -5070,6 +5239,9 @@ function renderFormula(data) {
       ...getStorageCapacityAudits(data).map(item=>item.text),
       ...getRecoveryWorkspaceAudits(data).map(item=>item.text),
       getDnRebuildSummary(data).text,
+      getReserveHostSummary(data).text,
+      ...getTenantPlanningAudits(data).map(a=>a.status+"："+a.text),
+      ...getGtmExpansionLines(data),
       ...getDataHorizonAudits(data).map(item=>item.text)
     ].join("\n");
     return;
@@ -5097,7 +5269,7 @@ function renderFormula(data) {
     `DN 标定点 = ${data.dnReferenceCores}物理核 / ${data.dnReferenceMemoryGb}GB / ${data.dnReferenceTps}TPS；性能分片与 DN 规格均引用该标定点`,
     ...data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} DN规格：${tenant.dnSpecFormula}；${tenant.dnSpecReason}`),
     `说明：官方指南按总 TPS/QPS 与单节点经验性能、数据量共同确定分片数。页面的单核线性折算仅用于规格初算；SQL 复杂度、热点、日志同步、存储延迟会破坏线性关系，生产必须 POC 校准。`,
-    `DN 实例 = 租户内分片 × 各租户副本数汇总 = ${data.dnInstances}`,
+    `DN 实例 = ${formatDnInstanceSummary(data)}`,
     `DN 跨租户部署 = ${data.resourceReduction.dnTenantPlacementLabel}${data.resourceReduction.configuredDnTenantPlacement === "auto" ? "（环境自动）" : "（手工指定）"}`,
     `副本角色 = ${data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} ${tenant.replicasPerShard}副本（1主+${Math.max(0, tenant.replicasPerShard - 1)}从）`).join("；")}`,
     `GTM 实例 = ${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes}${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}；当前环境推荐每 Group ${data.recommendedGtmReplicasPerGroup} 副本`,
@@ -5124,6 +5296,9 @@ function renderFormula(data) {
     ...getStorageCapacityAudits(data).map(item=>item.text),
     ...getRecoveryWorkspaceAudits(data).map(item=>item.text),
       getDnRebuildSummary(data).text,
+      getReserveHostSummary(data).text,
+      ...getTenantPlanningAudits(data).map(a=>a.status+"："+a.text),
+      ...getGtmExpansionLines(data),
     ...getDataHorizonAudits(data).map(item=>item.text)
   ].join("\n");
   $("formulaOutput").textContent = text;
@@ -5132,12 +5307,12 @@ function renderFormula(data) {
 function renderReverseFormula(data) {
   const text = [
     "资源约束反推公式：",
-    `环境类型 = ${environmentLabels[data.environment]}，设计目标 = ${goalLabels[data.goal]}`,
+    `环境类型 = ${environmentLabels[data.environment]}，评分偏好 = ${goalLabels[data.goal]}`,
     `可用服务器口径 = FLOOR(${data.serverCount} × (1 - ${data.reserveRatio})) = ${data.usableServerCount} 台`,
     `CN 实例 = ${data.cnPerAz}/AZ × ${data.azCount} AZ = ${data.totalCn}`,
     `CN 租户部署 = ${data.resourceReduction.cnTenantPlacementLabel}${data.resourceReduction.configuredCnTenantPlacement === "auto" ? "（环境自动）" : "（手工指定）"}`,
     `DN 租户部署 = ${data.resourceReduction.dnTenantPlacementLabel}${data.resourceReduction.configuredDnTenantPlacement === "auto" ? "（环境自动）" : "（手工指定）"}`,
-    `DN 实例 = ${data.shardCount} 分片 × ${data.replicasPerShard} 副本 = ${data.dnInstances}`,
+    `DN 实例 = ${formatDnInstanceSummary(data)}；最大每Group副本 ${data.replicasPerShard}，不是所有租户统一副本数`,
     `GTM 实例 = ${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes}${data.configuredGtmReplicasPerGroup ? "（手工指定）" : "（自动推荐）"}，管理节点 = ${data.managementNodes}`,
     `独立部署服务器估算 = CN ${data.componentSizing.cnServers} + DN ${data.componentSizing.dnServers} + GTM ${data.componentSizing.gtmServers} + 管理 ${data.componentSizing.managementServers} = ${data.requiredDedicatedServers} 台（总量及隔离约束估算，逐实例落位另验）`,
     `组件组合对比 = 独立 ${data.componentSizing.dedicatedServers} 台 / GTM+管理 ${data.componentSizing.gtmMgrMixedServers} 台 / CN+DN ${data.componentSizing.cnDnMixedServers} 台 / 双主机组 ${data.componentSizing.cnDnGtmMgrMixedServers} 台 / 全混布 ${data.componentSizing.allMixedServers} 台`,
@@ -5150,13 +5325,17 @@ function renderReverseFormula(data) {
     ...getStorageCapacityAudits(data).map(item=>item.text),
     ...getRecoveryWorkspaceAudits(data).map(item=>item.text),
       getDnRebuildSummary(data).text,
+      getReserveHostSummary(data).text,
+      ...getTenantPlanningAudits(data).map(a=>a.status+"："+a.text),
+      ...getGtmExpansionLines(data),
     ...getDataHorizonAudits(data).map(item=>item.text),
     ...(data.centerQuotaAudit || []).map(site => `${site.az} 配额：需求 ${site.required} / 现有 ${site.available} / 已分配 ${site.assigned} / 缺口 ${site.missing} 台`),
     `当前按服务器序号轮转到各中心；满足上述中心配额需要总数至少 ${data.requiredServerCount} 台，未自动增加客户输入机器。`,
     `资源状态 = ${data.resourceState}`,
     "",
     "评分：",
-    `综合评分 ${data.scores.weighted}/100，性能 ${data.scores.performance}/100，可用性 ${data.scores.availability}/100，容量 ${data.scores.capacity}/100`
+    getReverseScoreSummary(data).text,
+    getReverseScoreFormula(data)
   ].join("\n");
   $("formulaOutput").textContent = text;
 }
@@ -5164,7 +5343,7 @@ function renderReverseFormula(data) {
 function renderReversePlan(data) {
   const conclusion = getReverseConclusion(data);
   const cards = [
-    ["推荐类型", `${environmentLabels[data.environment]} · ${goalLabels[data.goal]}`],
+    ["评分偏好", `${environmentLabels[data.environment]} · ${goalLabels[data.goal]}（仅改变权重）`],
     ["资源状态", `${data.resourceState}，${conclusion}`],
     ["组件组合", `${data.componentLayoutLabel} · ${data.componentSizing.note}`],
     ["资源缩减", `${data.resourceReduction.presetLabel} · 基线 ${data.componentSizing.strictBaselineServers} 台，估算缩减 ${data.componentSizing.savedServers} 台`],
@@ -5182,7 +5361,7 @@ function renderReversePlan(data) {
     ["推荐资源总量", `${data.totalCn} CN / ${data.businessTenants} 租户 / ${data.dnInstances} DN / ${data.gtmNodes} GTM / ${data.managementNodes} 管理`],
     ["租户分片与副本", data.tenantPlans.map((tenant) => `${displayTenantKey(getTenantKey(tenant), data.tenantPlans)}: ${tenant.shardCount}分片×${tenant.replicasPerShard}副本`).join("；")],
     ["DN 中心分布", `${data.dnCenterDistribution.centers.map((item) => `${item.az} ${item.instances}实例/${item.hosts}机`).join("；")}。${data.dnCenterDistribution.explanation}`],
-    ["综合评分", `${data.scores.weighted}/100`]
+    ["启发式参考分", getReverseScoreSummary(data).text]
   ];
   $("reversePlan").innerHTML = `
     <div class="reverse-card-grid">
@@ -5272,12 +5451,14 @@ function getSelectedReductionMeasures(reduction) {
 
 function getResourceReductionRedlines(data) {
   const storageRedlines=getStorageCapacityAudits(data).filter(item=>item.error).map(item=>item.text);
-  const redlines = [...getDnPlacementIssues(data),...storageRedlines];
+  if(getGtmExpansionAudit(data).blocking) storageRedlines.push(getGtmExpansionAudit(data).text);
+  const redlines = [...getDnPlacementIssues(data),...storageRedlines,
+    ...getTenantPlanningAudits(data).filter(a=>a.error).map(a=>a.text)];
   redlines.push(...getPlanRoleIdentityIssues(data));
   getInstanceFitIssues(data).forEach(issue => redlines.push(issue.text));
   getPlanServers(data).forEach(server => {
-    if (!server.spec || !server.resourceAudit || server.resourceAudit.issues?.length) {
-      const state = getServerAuditStatus(server);
+    const state = getServerAuditStatus(server);
+    if (state.blocksDeployment) {
       redlines.push(`${server.id} 资源水位${state.status}：${state.detail}。请补全或修正资源信息，不能按零占用或校验通过处理。`);
     }
   });
@@ -5309,7 +5490,7 @@ function getResourceReductionRedlines(data) {
     data.tenantPlans.filter((tenant) => tenant.cnBelowMinimum && !tenant.cnWorkloads).forEach((tenant) => {
       redlines.push(`${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} 单 AZ CN=${tenant.cnPerAz}，安全能力 ${round(tenant.cnSafeTpsPerAz)}/${round(tenant.cnTargetTps)} TPS；性能或至少 2 个 CN 的冗余规则未通过。`);
     });
-    data.tenantPlans.filter((tenant) => tenant.shardBelowMinimum).forEach((tenant) => {
+    data.tenantPlans.filter((tenant) => tenant.shardBelowMinimum && tenant.isDistributed).forEach((tenant) => {
       redlines.push(`${displayTenantKey(getTenantKey(tenant), data.tenantPlans)} DN Group=${tenant.shardCount}，低于容量/TPS 水位建议 ${tenant.recommendedShardCount}；请增加 Group。`);
     });
   }
@@ -5451,7 +5632,7 @@ function renderBusinessPhysicalServerRow(server) {
   const audit = server.resourceAudit;
   const state = getServerAuditStatus(server);
   const specText = spec
-    ? `${spec.model} · ${spec.sockets}路/${spec.cores}物理核 · ${spec.memoryGb}GB · ${formatHostDiskCapacity(server)}${audit && !audit.issues?.length ? ` · 水位 CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / ${spec.storage?.mode==="net"?"净空间":"磁盘"} ${audit.diskDemandUnknown?"未评估":`${audit.diskPercent}%`}` : ""}`
+    ? `${spec.model} · ${spec.sockets}路/${spec.cores}物理核 · ${spec.memoryGb}GB · ${formatHostDiskCapacity(server)} · 水位 CPU ${formatServerCpuLoad(server)} / 内存 ${formatResourcePercent(getServerResourceDisplay(server).memory)} / ${spec.storage?.mode==="net"?"净空间":"磁盘"} ${formatServerDiskLoad(server)}`
     : "预留机型待确认";
   return `
     <article class="server-row physical-output-row">
@@ -5470,16 +5651,21 @@ function renderServerPlanRow(server) {
       <strong>${server.id}</strong>
       <span>${server.az}</span>
       <small>${escapeAttr(server.tenantPoolLabel || "现有集群共享服务器")}：${escapeAttr(roleText)}</small>
-      <i>CPU ${server.cpuLoad}% / 磁盘 ${formatServerDiskLoad(server)}</i>
+      <i>${escapeAttr(formatServerResourceSummary(server))} · ${escapeAttr(getServerAuditStatus(server).detail)}</i>
     </article>
   `;
 }
 
 function getReverseConclusion(data) {
+  if(getGtmExpansionAudit(data).enabled) return "当前仅为扩容对比诊断，不能作为可直接实施的增量扩容方案；请核验现网基线并锁定既有绑定与物理落位";
+  if (getTenantPlanningAudits(data).some(a=>a.error)) return "租户规划门禁未通过；当前不可作为可用部署方案，请先处理副本或集中式单分片初算缺口";
+  if (getPlanServers(data).some(server=>getServerAuditStatus(server).blocksDeployment)) return "已部署主机资源未通过或未评估，请补全规格/审计并处理超限；当前不可作为可用部署方案";
   if (!getPlanRoleIdentityAudit(data).complete) return "实例身份或落位未通过，请先核对缺失、重复、中心与资源池，再评估扩容；当前不可作为可用部署方案";
-  if (data.resourceState === "不足") return "需增加服务器或降低分片/副本/隔离要求";
+  if (data.resourceState === "不足") return "需增加服务器或降低分片/副本/隔离要求；当前不可作为可用部署方案";
+  if (getResourceReductionRedlines(data).length) return "仍存在未解决部署红线，当前不可作为可用部署方案；启发式参考分不能替代准入验证";
   if (data.storageDemandComplete === false) return "已录入资源可作初算，部分租户数据需求未评估，不能确认完整磁盘承载";
   if (data.environment === "poc") return "可用于 POC 验证，生产需重新按隔离规则评审";
+  if (getTenantPlanningAudits(data).some(a=>a.status==="未评估")) return "资源仅供初算，集中式业务性能未评估，不能确认生产承载";
   if (data.resourceState === "临界") return "可做生产初评，建议扩容后上线";
   return "可作为生产架构初稿，仍需厂商评审和压测确认";
 }
@@ -6007,7 +6193,7 @@ function renderTopologyServerTiles(servers) {
         </div>
         <p>${escapeAttr(roleGroups)}</p>
         <small class="reverse-server-detail">${escapeAttr(renderServerRoleDetail(server.roles))}</small>
-        <small>CPU ${server.cpuLoad}% · 磁盘 ${formatServerDiskLoad(server)} · ${server.roles.length ? `${server.roles.length} 组件实例` : "预留节点"}</small>
+        <small>${escapeAttr(formatServerResourceSummary(server))} · ${server.roles.length ? `${server.roles.length} 组件实例` : "预留节点"}</small>
       </article>
     `;
   }).join("");
@@ -6343,14 +6529,14 @@ function renderServerBoard(data) {
       <div class="tenant-board server-board">
         <div class="tenant-board-head">
           <strong>服务器部署视图</strong>
-        <span>${data.resourceState} · ${data.componentLayoutLabel} · ${data.scores.weighted}/100</span>
+        <span>${data.resourceState} · ${data.componentLayoutLabel} · ${getReverseScoreSummary(data).label}</span>
         </div>
       <div class="server-board-grid">
         ${data.serverPlan.map((server) => `
           <article class="server-tile">
             <div><strong>${server.id}</strong><span>${server.az}</span></div>
             <p>${escapeAttr(server.roles.length ? displayRoles(server.roles).join(" / ") : "预留资源")}</p>
-            <small>CPU ${server.cpuLoad}% · 磁盘 ${formatServerDiskLoad(server)}</small>
+            <small>${escapeAttr(formatServerResourceSummary(server))}</small>
           </article>
         `).join("")}
       </div>
@@ -6489,6 +6675,7 @@ function renderSite(site, data) {
 }
 
 function getDnRoleText(site, data) {
+  if (data.tenantPlans?.length > 1) return `各租户副本分别为 ${data.tenantPlans.map(t=>t.replicasPerShard).join(" / ")}；本站主从角色以逐实例落位为准，不由最大副本数推导`;
   const slaveCount = Math.max(0, data.replicasPerShard - 1);
   if (site.id === "local") {
     return `Master × ${data.shardCount}${slaveCount ? ` / 本地备副本 × ${slaveCount}` : ""}`;
@@ -6539,24 +6726,25 @@ function copySummary() {
   const isReverse = $("designModule").value === "reverse";
   const summary = isReverse ? [
     `GoldenDB 资源约束反推架构`,
-    `环境/目标：${environmentLabels[data.environment]} · ${goalLabels[data.goal]}`,
+    `环境/评分偏好：${environmentLabels[data.environment]} · ${goalLabels[data.goal]}`,
     `部署方式：${modeLabels[data.mode]}`,
     `服务器：${data.serverCount} 台，资源状态：${data.resourceState}`,
     `CN：${data.cnPerAz}/AZ，总计 ${data.totalCn}`,
     `CN 租户部署：${data.resourceReduction.cnTenantPlacementLabel}`,
-    `DN：${data.shardCount} Group × ${data.replicasPerShard} 副本 = ${data.dnInstances} 实例`,
+    `DN：${formatDnInstanceSummary(data)}`,
     `GTM：${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 实例，${data.gtmBinding.label}`,
     `GTM 部署亲和：${data.gtmAffinityLabel}`,
     `管理节点：${data.managementNodes} 个（建议不少于 ${data.recommendedManagementNodes} 个）`,
-    `综合评分：${data.scores.weighted}/100`,
+    getReverseScoreSummary(data).text,
+    getReverseScoreFormula(data),
     `结论：${getReverseConclusion(data)}`
   ].join("\n") : [
     `GoldenDB ${modeLabels[data.mode]} ${shapeLabels[data.shape]} 部署建议`,
     `每 AZ CN：${data.cnPerAz}`,
     `CN 租户部署：${data.resourceReduction.cnTenantPlacementLabel}`,
-    `推荐分片数：${data.shardCount}`,
-    `每分片副本：${data.replicasPerShard}`,
-    `DN 实例数：${data.dnInstances}`,
+    `当前分片汇总：${data.shardCount}`,
+    `最大每分片副本：${data.replicasPerShard}；各租户分别配置`,
+    `DN 实例数：${formatDnInstanceSummary(data)}`,
     `GTM：${data.shape === "distributed" ? `${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本 = ${data.gtmNodes} 实例，${data.gtmBinding.label}` : "集中式场景可选"}`,
     `GTM 部署亲和：${data.serverSizing.gtmAffinityLabel}`,
     `管理节点：${data.managementNodes} 个（建议不少于 ${data.recommendedManagementNodes} 个）`,
@@ -6564,7 +6752,7 @@ function copySummary() {
     `说明：该结果为预评估建议，生产需结合版本手册、厂商评审和 POC 压测。`
   ].join("\n");
 
-  navigator.clipboard?.writeText(`${summary}\n${getDnPrimaryDistribution(data).map(item => item.text).join("\n")}`).then(() => {
+  navigator.clipboard?.writeText(`${summary}\n${getGtmExpansionLines(data).join("\n")}\n${getDnPrimaryDistribution(data).map(item => item.text).join("\n")}`).then(() => {
     $("copyBtn").textContent = "已复制";
     setTimeout(() => {
       $("copyBtn").textContent = "复制摘要";
@@ -6830,8 +7018,8 @@ function buildExcelSheets(data) {
     ["数据库形态", data.reverse ? "分布式" : shapeLabels[data.shape], "租户资源包含 CN、DN，分布式租户绑定 GTM"],
     ["租户数量", data.businessTenants, "租户资源按当前参数逐项生成"],
     ["CN 总实例", data.totalCn, "按单 AZ、单租户性能需求汇总"],
-    ["DN Group 总数", data.shardCount, "按容量与 TPS 两个维度取较大值"],
-    ["DN 副本实例", data.dnInstances, "Group 数 × 每 Group 副本数"],
+    ["DN Group 总数", data.shardCount, data.reverse ? "按各租户输入的固定Group数汇总；集中式固定1 Group" : "按各租户实际采用Group数汇总；自动由容量/TPS及取偶策略推荐，手动数量保持"],
+    ["DN 副本实例", data.dnInstances, formatDnInstanceSummary(data)],
     ["GTM 实例", data.gtmNodes, `${data.gtmBinding.groupCount} Group × ${data.gtmReplicasPerGroup} 副本`],
     ["管理节点", data.managementNodes, `环境建议不少于 ${data.recommendedManagementNodes}`],
     ["实际服务器", servers.length, "以组网落位后的 Server 清单为准"],
@@ -6843,6 +7031,7 @@ function buildExcelSheets(data) {
   getLayoutFeasibilityAudits(data).forEach(item=>summaryRows.push(["组件组合落位核验",item.status,formatLayoutFeasibility(item)]));
   getStorageCapacityAudits(data).forEach(item=>summaryRows.push(["磁盘容量核对 / "+item.component,item.status,item.text]));
   getRecoveryWorkspaceAudits(data).forEach(item=>summaryRows.push(["恢复工作区预算 / "+item.component,item.status,item.text]));
+  summaryRows.push(["预留主机状态", "仅说明当前库存，不保证备用容量", getReserveHostSummary(data).text]);
   summaryRows.push(["DN整机重建必要条件", "未评估", getDnRebuildSummary(data).text]);
   getDnRebuildAudits(data).forEach(item=>summaryRows.push(["DN整机重建逐故障",item.placementStatus,item.text]));
   getDataHorizonAudits(data).forEach(item=>summaryRows.push(["数据时点与三年参考 / "+item.component,item.status,item.text]));
@@ -6865,6 +7054,17 @@ function buildExcelSheets(data) {
   getPerformanceEvidence(data).forEach(item=>summaryRows.push(["性能证据 / "+item.component,item.status,item.text]));
   (data.centerQuotaAudit || []).forEach(site => summaryRows.push(["中心主机配额", site.az,
     `需求 ${site.required} / 现有 ${site.available} / 已分配 ${site.assigned} / 缺口 ${site.missing} 台`]));
+  getTenantPlanningAudits(data).forEach(a=>summaryRows.push(["租户规划门禁 / "+a.kind,a.status,a.text]));
+  if (data.reverse) {
+    summaryRows.push(["启发式参考分",data.scores.weighted,getReverseScoreSummary(data).text]);
+    summaryRows.push(["评分偏好",goalLabels[data.goal],getReverseScoreSummary(data).weightText]);
+    summaryRows.push(["评分计算式","启发式",getReverseScoreFormula(data)]);
+  }
+  summaryRows.push(["规划用途",getGtmExpansionAudit(data).enabled?"扩容对比（仅诊断）":"新建／重新规划",getGtmExpansionLines(data)[0]]);
+  if(getGtmExpansionAudit(data).enabled) {
+    summaryRows.push(["GTM扩容对比（诊断）",getGtmExpansionAudit(data).status,getGtmExpansionAudit(data).text]);
+    getGtmExpansionAudit(data).rows.forEach(r=>summaryRows.push(["GTM既有/新增租户 / "+r.tenantId,r.status,`${r.name}：${r.beforeBinding}→${r.afterBinding}；副本 ${r.beforeReplicas}→${r.afterReplicas}；资源池 ${r.beforePool}→${r.afterPool}`]));
+  }
   const summarySheet = buildExcelTableSheet({
     name: "方案摘要",
     title: "GoldenDB 方案摘要",
@@ -6903,7 +7103,7 @@ function buildExcelSheets(data) {
     tenant.gtmGroupText,
     tenant.cnSpecLabel || `${tenant.cnCores}C/${tenant.cnMemoryGb}GB`,
     tenant.dnSpecLabel || `${tenant.dnCores}C/${tenant.dnMemoryGb}GB`,
-    tenant.cnBelowMinimum || tenant.shardBelowMinimum ? "未通过" : data.reverse ? (tenant.storageDemandKnown ? "已计入数据，落位另验" : "数据需求未评估") : tenant.workloadIssues?.length ? "需复核" : "通过",
+    tenant.cnBelowMinimum || (tenant.shardBelowMinimum && tenant.isDistributed) || getTenantPlanningAudits(data).some(a=>a.tenant===getTenantKey(tenant)&&a.error) ? "未通过" : getTenantPlanningAudits(data).some(a=>a.tenant===getTenantKey(tenant)&&a.status!=="通过") ? "需复核" : data.reverse ? (tenant.storageDemandKnown ? "已计入数据，落位另验" : "数据需求未评估") : tenant.workloadIssues?.length ? "需复核" : "通过",
     tenant.tenantId,
     tenant.plannedTxnTps === undefined ? "未评估" : Number(round(tenant.plannedTxnTps)),
     dnPrimaryLabels[tenant.primaryStrategy || "balanced"]
@@ -6916,7 +7116,7 @@ function buildExcelSheets(data) {
     widths: [14, 24, 20, 14, 14, 14, 14, 10, 42, 12, 13, 13, 10, 13, 12, 14, 28, 18, 18, 14, 16, 18, 24],
     rowStyle(values, index, defaultStyles) {
       defaultStyles[1] = data.tenantPlans[index]?.deploymentStrategy === "dedicated" ? excelStyles.dedicatedServer : excelStyles.sharedServer;
-      defaultStyles[19] = values[19] === "通过" ? excelStyles.pass : excelStyles.risk;
+      defaultStyles[19] = values[19] === "通过" ? excelStyles.pass : values[19] === "未通过" ? excelStyles.risk : excelStyles.note;
       return defaultStyles;
     }
   });
@@ -6926,9 +7126,8 @@ function buildExcelSheets(data) {
     "管理节点数", "实例明细", "CPU水位%", "内存水位%", "磁盘水位%", "水位校验", "服务器规格"
   ];
   const serverRows = servers.map((server) => {
-    const audit = server.resourceAudit;
-    const state = getServerAuditStatus(server);
-    const known = Boolean(server.spec && audit && !audit.issues?.length);
+    const display = getServerResourceDisplay(server);
+    const state = display.state;
     return [
       server.id,
       server.az,
@@ -6942,9 +7141,9 @@ function buildExcelSheets(data) {
       server.roles.filter(isGtmRole).length,
       server.roles.filter((role) => role === "管理节点").length,
       server.roles.map((role) => formatExcelRole(role, data.tenantPlans)).join(" / ") || "扩容预留",
-      known ? audit.cpuPercent : "未评估",
-      known ? audit.memoryPercent : "未评估",
-      known && !audit.diskDemandUnknown ? audit.diskPercent : "未评估",
+      display.cpu,
+      display.memory,
+      typeof display.disk === "number" ? display.disk : "未评估",
       state.status,
       server.spec
         ? `${server.spec.model}；${server.spec.sockets}路/${server.spec.cores}物理核；${server.spec.memoryGb}GB；${formatHostDiskCapacity(server)}；${server.spec.network}`
@@ -6961,7 +7160,8 @@ function buildExcelSheets(data) {
       defaultStyles[4] = servers[index]?.tenantPool && servers[index]?.tenantPool !== "shared"
         ? excelStyles.dedicatedServer
         : excelStyles.sharedServer;
-      defaultStyles[15] = values[15] === "通过" ? excelStyles.pass : excelStyles.risk;
+      const severity = getServerAuditStatus(servers[index]).severity;
+      defaultStyles[15] = severity === "pass" ? excelStyles.pass : severity === "blocking" ? excelStyles.risk : excelStyles.note;
       return defaultStyles;
     }
   });
@@ -6999,6 +7199,9 @@ function buildExcelSheets(data) {
   });
 
   const riskRows = [];
+  if(getGtmExpansionAudit(data).enabled) riskRows.push(["扩容用途边界","高风险","整体方案",getGtmExpansionAudit(data).text]);
+  if (data.reverse) riskRows.push(["评分边界",getReverseScoreSummary(data).blocked?"高风险":"提示","整体方案",getReverseScoreSummary(data).text]);
+  getTenantPlanningAudits(data).forEach(a=>riskRows.push(["租户规划门禁 / "+a.kind,a.error?"高风险":a.status==="通过"?"通过":a.status==="未评估"?"未评估":"提示",displayTenantKey(a.tenant,data.tenantPlans),a.text]));
   getDnPrimaryDistribution(data).forEach(item => riskRows.push([
     "主角色分布", item.incomplete || item.spread > 1 ? "提示" : "通过",
     `${displayTenantKey(item.tenant, data.tenantPlans)} / ${item.az}`, item.text
@@ -7022,9 +7225,9 @@ function buildExcelSheets(data) {
     const state = getServerAuditStatus(server);
     riskRows.push([
       "服务器水位",
-      state.status === "通过" ? "通过" : state.status === "部分未评估" ? "未评估" : "高风险",
+      state.severity === "pass" ? "通过" : state.blocksDeployment ? "高风险" : state.status === "空闲预留" ? "提示" : "未评估",
       `${server.id} / ${server.az}`,
-      !server.spec || !audit || audit.issues?.length ? `${state.status}：${state.detail}` : `CPU ${audit.cpuPercent}% / 内存 ${audit.memoryPercent}% / ${server.spec.storage?.mode==="net"?"净数据空间":"磁盘"} ${formatServerDiskLoad(server)}；CPU/内存预留 ${round((data.reverse ? data.reserveRatio : data.serverSizing.reserveRatio) * 100)}%；磁盘按主机口径核对`
+      `${state.status}：${state.detail} ${formatServerResourceSummary(server)}；内存 ${formatResourcePercent(getServerResourceDisplay(server).memory)}。`
     ]);
   });
   const validGtmRoles = [...getPlanRoleIdentityAudit(data).validRoleHosts.keys()].filter(isGtmRole);
@@ -7289,9 +7492,13 @@ async function renderElementToPng(target) {
   const staging = document.createElement("div");
   staging.style.cssText = "position:fixed;left:-100000px;top:0;z-index:-1;pointer-events:none;background:#08110f;";
   const layoutClone = target.cloneNode(true);
-  if (latestDesignData && !getPlanRoleIdentityAudit(latestDesignData).complete) {
+  if (latestDesignData && (!getPlanRoleIdentityAudit(latestDesignData).complete
+    || getPlanServers(latestDesignData).some(server=>getServerAuditStatus(server).blocksDeployment)
+    || getTenantPlanningAudits(latestDesignData).some(a=>a.error)
+    || getGtmExpansionAudit(latestDesignData).enabled
+    || (latestDesignData.reverse && getResourceReductionRedlines(latestDesignData).length))) {
     const warning = document.createElement("div");
-    warning.textContent = "实例身份或落位校验未通过：本图仅供排查，不可作为可用部署方案。详见计算过程与风险校验。";
+    warning.textContent = "实例身份、资源或部署红线未通过：本图仅供排查，不可作为可用部署方案。详见计算过程与风险校验。";
     warning.style.cssText = "color:#ffb4b4;background:#341c1c;border-left:4px solid #ff6262;padding:12px;margin-bottom:12px;font-size:16px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
     layoutClone.prepend(warning);
   }
@@ -7300,6 +7507,36 @@ async function renderElementToPng(target) {
     note.textContent = getDnRebuildSummary(latestDesignData).text;
     note.style.cssText = "color:#ead6a4;background:#24271c;padding:10px;margin-bottom:10px;font-size:14px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
     layoutClone.prepend(note);
+  }
+  if (latestDesignData && getReserveHostSummary(latestDesignData).count) {
+    const reserveNote = document.createElement("div");
+    reserveNote.textContent = getReserveHostSummary(latestDesignData).text;
+    reserveNote.style.cssText = "color:#ead6a4;background:#24271c;padding:10px;margin-bottom:10px;font-size:14px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
+    layoutClone.prepend(reserveNote);
+  }
+  if (latestDesignData && getTenantPlanningAudits(latestDesignData).some(a=>a.status!=="通过")) {
+    const policyNote=document.createElement("div");
+    policyNote.textContent=getTenantPlanningSummary(latestDesignData)+" "+getTenantPlanningAudits(latestDesignData).filter(a=>a.status!=="通过").map(a=>a.status+"："+a.text).join("；");
+    policyNote.style.cssText="color:#ead6a4;background:#24271c;padding:10px;margin-bottom:10px;font-size:14px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
+    layoutClone.prepend(policyNote);
+  }
+  if (latestDesignData && new Set(latestDesignData.tenantPlans.map(t=>t.replicasPerShard)).size>1) {
+    const dnTotalsNote=document.createElement("div");
+    dnTotalsNote.textContent=formatDnInstanceSummary(latestDesignData)+"；这是规划实例数，实际落位另验，不等于物理服务器台数。";
+    dnTotalsNote.style.cssText="color:#ead6a4;background:#24271c;padding:10px;margin-bottom:10px;font-size:14px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
+    layoutClone.prepend(dnTotalsNote);
+  }
+  if (latestDesignData?.reverse) {
+    const scoreNote=document.createElement("div");
+    scoreNote.textContent=getReverseScoreSummary(latestDesignData).text;
+    scoreNote.style.cssText="color:#ead6a4;background:#24271c;padding:10px;margin-bottom:10px;font-size:14px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
+    layoutClone.prepend(scoreNote);
+  }
+  if (latestDesignData) {
+    const expansionNote=document.createElement("div");
+    expansionNote.textContent=getGtmExpansionLines(latestDesignData).join("；");
+    expansionNote.style.cssText="color:#ead6a4;background:#24271c;padding:10px;margin-bottom:10px;font-size:14px;line-height:1.6;white-space:normal;overflow-wrap:anywhere;";
+    layoutClone.prepend(expansionNote);
   }
   layoutClone.style.width = `${preferredWidth}px`;
   layoutClone.style.minWidth = `${preferredWidth}px`;
@@ -7482,6 +7719,7 @@ function markReductionPresetCustom(target) {
 }
 
 function resetForm() {
+  for(const module of ["business","reverse"]) gtmPlanningContexts[module]={intent:"new",baseline:null};
   businessTenantSpecs = cloneTenantSpecs(defaultBusinessTenants);
   reverseTenantSpecs = cloneTenantSpecs(defaultReverseTenants);
   Object.entries(defaults).forEach(([key, value]) => {
@@ -7499,6 +7737,7 @@ function resetForm() {
 function bindParameterEvents() {
   const inputPanel = document.querySelector(".input-panel");
   const handleParameterChange = (event) => {
+    if(event.target.id==="planningPurpose") {gtmPlanningContexts[$("designModule").value].intent=event.target.value==="new"?"new":"expansion";render();return;}
     // A hidden field can emit its final change event after switching modules.
     const section = event.target.closest(".parameter-section");
     const activeSection = $("designModule").value === "reverse" ? "reverseParams" : "businessParams";
@@ -7775,6 +8014,9 @@ function normalizeTenantOrder(specs) {
 
 $("copyBtn").addEventListener("click", copySummary);
 $("resetBtn").addEventListener("click", resetForm);
+$("captureGtmBaselineBtn").addEventListener("click",captureGtmComparisonBaseline);
+$("clearGtmBaselineBtn").addEventListener("click",()=>{gtmPlanningContexts[$("designModule").value].baseline=null;render();});
+$("exportGtmComparisonBtn").addEventListener("click",exportGtmComparisonRecord);
 $("downloadExcelBtn").addEventListener("click", downloadExcelPlan);
 $("downloadTopologyBtn").addEventListener("click", () => downloadTopologyImage("topology", "downloadTopologyBtn", "goldendb-network-plan"));
 $("downloadServerTopologyBtn").addEventListener("click", () => downloadTopologyImage("serverTopology", "downloadServerTopologyBtn", "goldendb-server-plan"));
