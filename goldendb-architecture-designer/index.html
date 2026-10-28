@@ -59,6 +59,16 @@
             <p class="field-help">基线仅为本页会话的规划快照，不是现网核验。两模块分别保存；刷新或全部重置会清除。记录可导出存档，暂不支持导入恢复。扩容对比时已有基线锁定；需替换请先切回新建重算。扩容对比不会锁定旧绑定或物理落位，不能直接作为实施方案。</p>
           </div>
 
+          <details class="baseline-contract-panel">
+            <summary>基线／增量候选约束检查（不应用到方案）</summary>
+            <p>选择基线或增量约束JSON，核对身份、归属、站点、反亲和、资源预算；增量文件另核对既有对象锁定与新增清单。未知项单列；文件声明不等于现网核验，不执行增量落位或数据库操作。</p>
+            <label class="field"><span>基线JSON（最多2MiB）</span><input id="baselineContractFile" type="file" accept=".json,application/json"></label>
+            <a href="./examples/expansion-baseline-60-synthetic.json" download>下载60台结构用例JSON（合成样例）</a>
+            <a href="./examples/incremental-add-tenant-synthetic.json" download>下载新增租户约束JSON（合成样例）</a>
+            <pre id="baselineContractResult" class="baseline-contract-result" role="status">尚未选择基线文件；此处仅做独立检查，不载入当前方案。</pre>
+            <button id="downloadBaselineReportBtn" class="ghost-btn" type="button" disabled>下载结构检查报告</button>
+          </details>
+
           <section id="businessParams" class="parameter-section">
             <label class="field">
               <span>部署方式</span>
@@ -678,6 +688,8 @@
       </section>
     </main>
 
+    <script src="./expansion-baseline.js"></script>
+    <script src="./incremental-constraints.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

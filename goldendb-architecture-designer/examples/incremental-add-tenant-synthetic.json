@@ -1,0 +1,2064 @@
+{
+  "schema": "goldendb-incremental-constraints-v1",
+  "operation": "add-tenants",
+  "baseline": {
+    "schema": "goldendb-expansion-baseline-v1",
+    "source": {
+      "kind": "synthetic",
+      "reference": "用户60台/24+3+1分片用例的工具结构样例，非现网配置",
+      "databaseVersion": null
+    },
+    "sites": [
+      {
+        "id": "LOCAL",
+        "name": "本地机房"
+      },
+      {
+        "id": "METRO",
+        "name": "同城机房"
+      }
+    ],
+    "pools": [
+      {
+        "id": "DN"
+      },
+      {
+        "id": "MGR"
+      },
+      {
+        "id": "OPS"
+      },
+      {
+        "id": "CN-GTM"
+      }
+    ],
+    "hosts": [
+      {
+        "id": "A-01",
+        "siteId": "LOCAL",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-02",
+        "siteId": "LOCAL",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-03",
+        "siteId": "LOCAL",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-04",
+        "siteId": "LOCAL",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-05",
+        "siteId": "LOCAL",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-06",
+        "siteId": "LOCAL",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-07",
+        "siteId": "LOCAL",
+        "poolId": "OPS",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-08",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-09",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-10",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-11",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-12",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-13",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-14",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-15",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-16",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-17",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-18",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-19",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-20",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-21",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-22",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-23",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-24",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-25",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-26",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-27",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-28",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-29",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-30",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-01",
+        "siteId": "METRO",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-02",
+        "siteId": "METRO",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-03",
+        "siteId": "METRO",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-04",
+        "siteId": "METRO",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-05",
+        "siteId": "METRO",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-06",
+        "siteId": "METRO",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-07",
+        "siteId": "METRO",
+        "poolId": "OPS",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-08",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-09",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-10",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-11",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-12",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-13",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-14",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-15",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-16",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-17",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-18",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-19",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-20",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-21",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-22",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-23",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-24",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-25",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-26",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-27",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-28",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-29",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-30",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      }
+    ],
+    "tenants": [
+      {
+        "id": "T1",
+        "name": "租户1",
+        "cnCount": 6,
+        "cnRequiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "allowedCnPoolIds": [
+          "CN-GTM"
+        ],
+        "dnGroupIds": [
+          "T1-DN-G1"
+        ],
+        "gtmGroupId": "GTM-SYS"
+      },
+      {
+        "id": "T2",
+        "name": "租户2",
+        "cnCount": 6,
+        "cnRequiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "allowedCnPoolIds": [
+          "CN-GTM"
+        ],
+        "dnGroupIds": [
+          "T2-DN-G1"
+        ],
+        "gtmGroupId": "GTM-SYS"
+      }
+    ],
+    "groups": [
+      {
+        "id": "T1-DN-G1",
+        "component": "DN",
+        "allowedPoolIds": [
+          "DN"
+        ],
+        "tenantIds": [
+          "T1"
+        ],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      },
+      {
+        "id": "T2-DN-G1",
+        "component": "DN",
+        "allowedPoolIds": [
+          "DN"
+        ],
+        "tenantIds": [
+          "T2"
+        ],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      },
+      {
+        "id": "MGR",
+        "component": "MGMT",
+        "allowedPoolIds": [
+          "MGR"
+        ],
+        "tenantIds": [],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      },
+      {
+        "id": "GTM-SYS",
+        "component": "GTM",
+        "allowedPoolIds": [
+          "CN-GTM"
+        ],
+        "tenantIds": [
+          "T1",
+          "T2"
+        ],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      }
+    ],
+    "instances": [
+      {
+        "id": "T1-DN-G1-R1",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "primary",
+        "hostId": "A-01",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R1",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "primary",
+        "hostId": "A-01",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R2",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "A-02",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R2",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "A-02",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R3",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "A-03",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R3",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "A-03",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R1",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "primary",
+        "hostId": "A-04",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R2",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "A-05",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R3",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "A-06",
+        "resourceDemand": null
+      },
+      {
+        "id": "OPS-CN1",
+        "component": "OPS_CN",
+        "tenantId": null,
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-07",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN1",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R1",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "primary",
+        "hostId": "A-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN1",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN2",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R2",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "A-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN2",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN3",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R3",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "A-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN3",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R4",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "B-01",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R4",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "B-01",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R5",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "B-02",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R5",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "B-02",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R6",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "B-03",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R6",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "B-03",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R4",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "B-04",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R5",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "B-05",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R6",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "B-06",
+        "resourceDemand": null
+      },
+      {
+        "id": "OPS-CN2",
+        "component": "OPS_CN",
+        "tenantId": null,
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-07",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN4",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R4",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "B-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN4",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN5",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R5",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "B-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN5",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN6",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R6",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "B-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN6",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-10",
+        "resourceDemand": null
+      }
+    ],
+    "policies": {
+      "maxComponents": 4,
+      "opsCnCount": 2,
+      "sameTenantCnAntiAffinity": true,
+      "allowCnGtmColocation": true,
+      "allowCrossTenantDn": true,
+      "allowCrossTenantCn": true,
+      "managementDedicated": true,
+      "opsCnDedicated": true,
+      "dnDedicated": true
+    }
+  },
+  "candidate": {
+    "schema": "goldendb-expansion-baseline-v1",
+    "source": {
+      "kind": "synthetic",
+      "reference": "用户60台/24+3+1分片用例的工具结构样例，非现网配置",
+      "databaseVersion": null
+    },
+    "sites": [
+      {
+        "id": "LOCAL",
+        "name": "本地机房"
+      },
+      {
+        "id": "METRO",
+        "name": "同城机房"
+      }
+    ],
+    "pools": [
+      {
+        "id": "DN"
+      },
+      {
+        "id": "MGR"
+      },
+      {
+        "id": "OPS"
+      },
+      {
+        "id": "CN-GTM"
+      }
+    ],
+    "hosts": [
+      {
+        "id": "A-01",
+        "siteId": "LOCAL",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-02",
+        "siteId": "LOCAL",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-03",
+        "siteId": "LOCAL",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-04",
+        "siteId": "LOCAL",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-05",
+        "siteId": "LOCAL",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-06",
+        "siteId": "LOCAL",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-07",
+        "siteId": "LOCAL",
+        "poolId": "OPS",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-08",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-09",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-10",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-11",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-12",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-13",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-14",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-15",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-16",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-17",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-18",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-19",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-20",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-21",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-22",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-23",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-24",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-25",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-26",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-27",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-28",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-29",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "A-30",
+        "siteId": "LOCAL",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-01",
+        "siteId": "METRO",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-02",
+        "siteId": "METRO",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-03",
+        "siteId": "METRO",
+        "poolId": "DN",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-04",
+        "siteId": "METRO",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-05",
+        "siteId": "METRO",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-06",
+        "siteId": "METRO",
+        "poolId": "MGR",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-07",
+        "siteId": "METRO",
+        "poolId": "OPS",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-08",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-09",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-10",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-11",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-12",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-13",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-14",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-15",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-16",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-17",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-18",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-19",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-20",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-21",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-22",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-23",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-24",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-25",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-26",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-27",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-28",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-29",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      },
+      {
+        "id": "B-30",
+        "siteId": "METRO",
+        "poolId": "CN-GTM",
+        "maxComponents": 4,
+        "usableResources": null
+      }
+    ],
+    "tenants": [
+      {
+        "id": "T1",
+        "name": "租户1",
+        "cnCount": 6,
+        "cnRequiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "allowedCnPoolIds": [
+          "CN-GTM"
+        ],
+        "dnGroupIds": [
+          "T1-DN-G1"
+        ],
+        "gtmGroupId": "GTM-SYS"
+      },
+      {
+        "id": "T2",
+        "name": "租户2",
+        "cnCount": 6,
+        "cnRequiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "allowedCnPoolIds": [
+          "CN-GTM"
+        ],
+        "dnGroupIds": [
+          "T2-DN-G1"
+        ],
+        "gtmGroupId": "GTM-SYS"
+      },
+      {
+        "id": "T3",
+        "name": "租户3",
+        "cnCount": 6,
+        "cnRequiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "allowedCnPoolIds": [
+          "CN-GTM"
+        ],
+        "dnGroupIds": [
+          "T3-DN-G1"
+        ],
+        "gtmGroupId": "T3-GTM"
+      }
+    ],
+    "groups": [
+      {
+        "id": "T1-DN-G1",
+        "component": "DN",
+        "allowedPoolIds": [
+          "DN"
+        ],
+        "tenantIds": [
+          "T1"
+        ],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      },
+      {
+        "id": "T2-DN-G1",
+        "component": "DN",
+        "allowedPoolIds": [
+          "DN"
+        ],
+        "tenantIds": [
+          "T2"
+        ],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      },
+      {
+        "id": "MGR",
+        "component": "MGMT",
+        "allowedPoolIds": [
+          "MGR"
+        ],
+        "tenantIds": [],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      },
+      {
+        "id": "GTM-SYS",
+        "component": "GTM",
+        "allowedPoolIds": [
+          "CN-GTM"
+        ],
+        "tenantIds": [
+          "T1",
+          "T2"
+        ],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      },
+      {
+        "id": "T3-DN-G1",
+        "component": "DN",
+        "allowedPoolIds": [
+          "DN"
+        ],
+        "tenantIds": [
+          "T3"
+        ],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      },
+      {
+        "id": "T3-GTM",
+        "component": "GTM",
+        "allowedPoolIds": [
+          "CN-GTM"
+        ],
+        "tenantIds": [
+          "T3"
+        ],
+        "replicaCount": 6,
+        "requiredBySite": {
+          "LOCAL": 3,
+          "METRO": 3
+        },
+        "primarySiteId": "LOCAL"
+      }
+    ],
+    "instances": [
+      {
+        "id": "T1-DN-G1-R1",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "primary",
+        "hostId": "A-01",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R1",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "primary",
+        "hostId": "A-01",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R2",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "A-02",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R2",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "A-02",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R3",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "A-03",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R3",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "A-03",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R1",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "primary",
+        "hostId": "A-04",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R2",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "A-05",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R3",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "A-06",
+        "resourceDemand": null
+      },
+      {
+        "id": "OPS-CN1",
+        "component": "OPS_CN",
+        "tenantId": null,
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-07",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN1",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R1",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "primary",
+        "hostId": "A-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN1",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN2",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R2",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "A-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN2",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN3",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R3",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "A-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN3",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "A-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R4",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "B-01",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R4",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "B-01",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R5",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "B-02",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R5",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "B-02",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-DN-G1-R6",
+        "component": "DN",
+        "tenantId": "T1",
+        "groupId": "T1-DN-G1",
+        "role": "replica",
+        "hostId": "B-03",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-DN-G1-R6",
+        "component": "DN",
+        "tenantId": "T2",
+        "groupId": "T2-DN-G1",
+        "role": "replica",
+        "hostId": "B-03",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R4",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "B-04",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R5",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "B-05",
+        "resourceDemand": null
+      },
+      {
+        "id": "MGR-R6",
+        "component": "MGMT",
+        "tenantId": null,
+        "groupId": "MGR",
+        "role": "replica",
+        "hostId": "B-06",
+        "resourceDemand": null
+      },
+      {
+        "id": "OPS-CN2",
+        "component": "OPS_CN",
+        "tenantId": null,
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-07",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN4",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R4",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "B-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN4",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-08",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN5",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R5",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "B-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN5",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-09",
+        "resourceDemand": null
+      },
+      {
+        "id": "T1-CN6",
+        "component": "CN",
+        "tenantId": "T1",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "GTM-SYS-R6",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "GTM-SYS",
+        "role": "replica",
+        "hostId": "B-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "T2-CN6",
+        "component": "CN",
+        "tenantId": "T2",
+        "groupId": null,
+        "role": "service",
+        "hostId": "B-10",
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-DN-G1-R1",
+        "component": "DN",
+        "tenantId": "T3",
+        "groupId": "T3-DN-G1",
+        "role": "primary",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-DN-G1-R2",
+        "component": "DN",
+        "tenantId": "T3",
+        "groupId": "T3-DN-G1",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-DN-G1-R3",
+        "component": "DN",
+        "tenantId": "T3",
+        "groupId": "T3-DN-G1",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-CN1",
+        "component": "CN",
+        "tenantId": "T3",
+        "groupId": null,
+        "role": "service",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-GTM-R1",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "T3-GTM",
+        "role": "primary",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-CN2",
+        "component": "CN",
+        "tenantId": "T3",
+        "groupId": null,
+        "role": "service",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-GTM-R2",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "T3-GTM",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-CN3",
+        "component": "CN",
+        "tenantId": "T3",
+        "groupId": null,
+        "role": "service",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-GTM-R3",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "T3-GTM",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-DN-G1-R4",
+        "component": "DN",
+        "tenantId": "T3",
+        "groupId": "T3-DN-G1",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-DN-G1-R5",
+        "component": "DN",
+        "tenantId": "T3",
+        "groupId": "T3-DN-G1",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-DN-G1-R6",
+        "component": "DN",
+        "tenantId": "T3",
+        "groupId": "T3-DN-G1",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-CN4",
+        "component": "CN",
+        "tenantId": "T3",
+        "groupId": null,
+        "role": "service",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-GTM-R4",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "T3-GTM",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-CN5",
+        "component": "CN",
+        "tenantId": "T3",
+        "groupId": null,
+        "role": "service",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-GTM-R5",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "T3-GTM",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-CN6",
+        "component": "CN",
+        "tenantId": "T3",
+        "groupId": null,
+        "role": "service",
+        "hostId": null,
+        "resourceDemand": null
+      },
+      {
+        "id": "T3-GTM-R6",
+        "component": "GTM",
+        "tenantId": null,
+        "groupId": "T3-GTM",
+        "role": "replica",
+        "hostId": null,
+        "resourceDemand": null
+      }
+    ],
+    "policies": {
+      "maxComponents": 4,
+      "opsCnCount": 2,
+      "sameTenantCnAntiAffinity": true,
+      "allowCnGtmColocation": true,
+      "allowCrossTenantDn": true,
+      "allowCrossTenantCn": true,
+      "managementDedicated": true,
+      "opsCnDedicated": true,
+      "dnDedicated": true
+    }
+  },
+  "additions": {
+    "sites": [],
+    "pools": [],
+    "hosts": [],
+    "tenants": [
+      "T3"
+    ],
+    "groups": [
+      "T3-DN-G1",
+      "T3-GTM"
+    ],
+    "instances": [
+      "T3-DN-G1-R1",
+      "T3-DN-G1-R2",
+      "T3-DN-G1-R3",
+      "T3-CN1",
+      "T3-GTM-R1",
+      "T3-CN2",
+      "T3-GTM-R2",
+      "T3-CN3",
+      "T3-GTM-R3",
+      "T3-DN-G1-R4",
+      "T3-DN-G1-R5",
+      "T3-DN-G1-R6",
+      "T3-CN4",
+      "T3-GTM-R4",
+      "T3-CN5",
+      "T3-GTM-R5",
+      "T3-CN6",
+      "T3-GTM-R6"
+    ]
+  },
+  "baselineIdentityMap": null,
+  "newHostIdentityMap": []
+}

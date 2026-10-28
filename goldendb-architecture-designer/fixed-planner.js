@@ -33,15 +33,42 @@ function pack(block,hosts,cap){
  if(flow!==block.list.length)return false;
  groups.forEach((list,i)=>{let cursor=0;links[i].forEach((e,h)=>{if(e.initial-e.cap===1)hosts[h].components.push(list[cursor++]);});});return true;
 }
-function audit(config,hosts){const c=normalize(config),expected=tasks(c),map=new Map(expected.map(t=>[t.id,t])),seen=new Map(),errors=[];const fail=(code,detail)=>errors.push({code,detail});
- if(hosts.length!==c.serverCount)fail('host-count','服务器数不等于输入');const ids=new Set();const siteCounts=[0,0];
- for(const h of hosts){if(ids.has(h.id))fail('duplicate-host',h.id);ids.add(h.id);if(h.site!==0&&h.site!==1){fail('site',h.id);continue;}siteCounts[h.site]++;if(!Array.isArray(h.components)){fail('components',h.id);continue;}if(h.components.length>c.maxComponents)fail('density',h.id);
- const groups=new Set(),types=new Set(h.components.map(t=>t.type)),tenants=new Set(h.components.filter(t=>t.tenant).map(t=>t.tenant));
- if(types.has('管理')&&(h.components.length!==1))fail('management-isolation',h.id);if(types.has('运维CN')&&h.components.length!==1)fail('ops-isolation',h.id);if(types.has('DN')&&types.size>1)fail('dn-isolation',h.id);
- if(!c.mixCnGtm&&types.has('CN')&&types.has('GTM'))fail('cn-gtm-mix',h.id);if(!c.shareCn&&!types.has('DN')&&tenants.size>1)fail('cn-tenant-isolation',h.id);
- for(const t of h.components){const e=map.get(t.id);seen.set(t.id,(seen.get(t.id)||0)+1);if(!e){fail('unexpected',t.id);continue;}if(JSON.stringify(t)!==JSON.stringify(e))fail('identity',t.id);if(h.site!==e.site)fail('wrong-site',t.id);if(t.role==='主'&&h.site!==0)fail('primary-site',t.id);if(groups.has(t.group))fail('anti-affinity',h.id+':'+t.group);groups.add(t.group);}}
- for(const t of expected)if(seen.get(t.id)!==1)fail('missing-or-duplicate',t.id);if(siteCounts.some(n=>n!==c.serverCount/2))fail('site-count','两机房服务器应各占一半');
- return {passed:!errors.length,errors,checkedComponents:expected.length,actualComponents:hosts.reduce((n,h)=>n+(h.components?.length||0),0),maxComponents:Math.max(0,...hosts.map(h=>h.components?.length||0)),siteCounts};}
+function audit(config,hosts){
+ const c=normalize(config),expected=tasks(c),map=new Map(expected.map(t=>[t.id,t])),seen=new Map(),errors=[];
+ const fail=(code,detail)=>errors.push({code,detail}),siteCounts=[0,0],safeHosts=Array.isArray(hosts)&&hosts.length<=500?hosts:[];
+ const result=()=>({passed:!errors.length,errors,checkedComponents:expected.length,
+   actualComponents:safeHosts.reduce((n,h)=>n+(Array.isArray(h?.components)?h.components.length:0),0),
+   maxComponents:Math.max(0,...Array.from(safeHosts,h=>Array.isArray(h?.components)?h.components.length:0)),siteCounts});
+ if(!Array.isArray(hosts)||hosts.length>500){fail('hosts-input','服务器清单必须为不超过500项的数组');return result();}
+ if(hosts.length!==c.serverCount)fail('host-count','服务器数不等于输入');
+ if(hosts.reduce((n,h)=>n+(Array.isArray(h?.components)?h.components.length:0),0)>LIMIT){fail('components-input','组件清单超过交互校验预算');return result();}
+ const ids=new Set();
+ for(const h of hosts){
+  if(!h||typeof h!=='object'||Array.isArray(h)){fail('host-input','服务器对象为空或非法');continue;}
+  if(typeof h.id!=='string'||!h.id.trim()||h.id!==h.id.trim()||h.id.length>120||/[\u0000-\u001f]/u.test(h.id))fail('host-id','服务器ID缺失或非法');
+  else{if(ids.has(h.id))fail('duplicate-host',h.id);ids.add(h.id);}
+  if(h.site!==0&&h.site!==1){fail('site',h.id);continue;}siteCounts[h.site]++;
+  if(!Array.isArray(h.components)){fail('components',h.id);continue;}
+  if(h.components.length>c.maxComponents)fail('density',h.id);
+  const valid=h.components.filter(t=>t&&typeof t==='object'&&!Array.isArray(t));
+  if(valid.length!==h.components.length)fail('component-input',h.id+':存在空或非法组件');
+  const groups=new Set(),types=new Set(valid.map(t=>t.type)),tenants=new Set(valid.filter(t=>t.tenant).map(t=>t.tenant));
+  if(types.has('管理')&&h.components.length!==1)fail('management-isolation',h.id);
+  if(types.has('运维CN')&&h.components.length!==1)fail('ops-isolation',h.id);
+  if(types.has('DN')&&types.size>1)fail('dn-isolation',h.id);
+  if(!c.mixCnGtm&&types.has('CN')&&types.has('GTM'))fail('cn-gtm-mix',h.id);
+  if(!c.shareCn&&!types.has('DN')&&tenants.size>1)fail('cn-tenant-isolation',h.id);
+  for(const t of valid){
+   const e=map.get(t.id);seen.set(t.id,(seen.get(t.id)||0)+1);if(!e){fail('unexpected',t.id);continue;}
+   // JSON object property order is not identity. All expected primitive fields and the exact key set still matter.
+   if(Object.keys(t).length!==Object.keys(e).length||Object.keys(e).some(k=>!Object.hasOwn(t,k)||t[k]!==e[k]))fail('identity',t.id);
+   if(h.site!==e.site)fail('wrong-site',t.id);if(t.role==='主'&&h.site!==0)fail('primary-site',t.id);
+   if(groups.has(t.group))fail('anti-affinity',h.id+':'+t.group);groups.add(t.group);
+  }
+ }
+ for(const t of expected)if(seen.get(t.id)!==1)fail('missing-or-duplicate',t.id);
+ if(siteCounts.some(n=>n!==c.serverCount/2))fail('site-count','两机房服务器应各占一半');return result();
+}
 function plan(input){const config=normalize(input),all=tasks(config),siteBlocks=[0,1].map(i=>blocks(config,all,i));const requirements=siteBlocks.map(bs=>bs.map(b=>({pool:b.name,components:b.list.length,hosts:minHosts(b,config.maxComponents)})));const requiredBySite=requirements.map(rs=>rs.reduce((n,r)=>n+r.hosts,0));const hosts=Array.from({length:config.serverCount},(_,i)=>({id:(i<config.serverCount/2?'A':'B')+'-'+String(i%(config.serverCount/2)+1).padStart(2,'0'),site:i<config.serverCount/2?0:1,pool:'空闲',components:[]}));
  const result={schema:'goldendb-fixed-v1',config,requiredBySite,requiredServers:requiredBySite[0]*2,requirements,hosts,structuralStatus:'未通过',productionStatus:'未评估',warnings:['这是固定数量及物理落位校验，不是性能/容量/生产准入证明。','管理6副本及3+3的仲裁、Team、复制/选主规则需按实际GoldenDB版本由厂商核验；不能直接套普通多数派结论。','业务CN是否可供运维跨租户使用、2个共用运维CN的实际授权/连接方式需核验；本结果仅预留2个独立实例。','未提供CPU/内存/净磁盘/IO/网络/数据量/负载/RPO/RTO，均未评估；机柜与真实交换机/地址由项目补齐。','同城两机房不能覆盖城市级灾害。'],missing:[]};
  if(requiredBySite.some(n=>n>config.serverCount/2)){result.missing=all.map(t=>t.id);result.audit={passed:false,errors:[{code:'insufficient-hosts',detail:'按当前隔离和密度约束至少需要'+result.requiredServers+'台，不能输出部分落位冒充完整方案。'}]};return result;}

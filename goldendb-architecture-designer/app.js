@@ -260,6 +260,7 @@ let nextTenantIdentity = 1;
 let businessTenantSpecs = cloneTenantSpecs(defaultBusinessTenants);
 let reverseTenantSpecs = cloneTenantSpecs(defaultReverseTenants);
 let latestDesignData = null;
+let baselineContractSequence=0,latestBaselineContractReport=null;
 const gtmPlanningContexts = {business:{intent:"new",baseline:null},reverse:{intent:"new",baseline:null}};
 const planActionIds = ["copyBtn", "downloadExcelBtn", "downloadTopologyBtn", "downloadServerTopologyBtn"];
 const planningLimits = Object.freeze({ tenants: 100, instances: 2000, servers: 2000 });
@@ -3607,6 +3608,42 @@ function getReverseScoreFormula(data) {
 
 function clampScore(value) {
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function resetBaselineContractAudit() {
+  baselineContractSequence++;latestBaselineContractReport=null;
+  if($("baselineContractFile")) $("baselineContractFile").value="";
+  if($("baselineContractResult")) $("baselineContractResult").textContent="尚未选择基线文件；此处仅做独立检查，不载入当前方案。";
+  if($("downloadBaselineReportBtn")) $("downloadBaselineReportBtn").disabled=true;
+}
+
+async function checkBaselineContractFile(file) {
+  const token=++baselineContractSequence;latestBaselineContractReport=null;$("downloadBaselineReportBtn").disabled=true;
+  if(!file){$("baselineContractResult").textContent="尚未选择基线文件。";return null;}
+  $("baselineContractResult").textContent="正在核对基线结构与录入预算……";
+  let report;
+  try {
+    if(typeof file.size!=="number"||!Number.isFinite(file.size)||file.size<0||file.size>2*1024*1024) throw new Error("size");
+    const raw=JSON.parse((await file.text()).replace(/^\uFEFF/,""));
+    report=raw?.schema==="goldendb-incremental-constraints-v1"?GoldenDBIncremental.validate(raw):GoldenDBBaseline.validate(raw);
+  } catch(error) {
+    report={valid:false,structuralStatus:"未通过",capacityStatus:"未评估",productionStatus:"未评估",errors:[{code:"file",path:"$",message:error.message==="size"?"文件应不超过2MiB":"文件读取或JSON解析失败"}],unknowns:[],errorCount:1,unknownCount:0,counts:{},limitation:"未载入当前规划，不能作为现网或生产认证。"};
+  }
+  if(token!==baselineContractSequence)return null;
+  report={...report,fileName:String(file.name||"未命名文件"),readOnly:true};latestBaselineContractReport=report;
+  const counts=report.counts||{};
+  $("baselineContractResult").textContent=[`结构：${report.structuralStatus}；资源预算：${report.capacityStatus}；生产：${report.productionStatus}`,
+    ...(report.existingLockStatus?[`既有角色：${report.existingLockStatus}；${report.mappingStatus}；${report.placementStatus}`]:[]),
+    `主机 ${counts.hosts??"—"} / 租户 ${counts.tenants??"—"} / 组 ${counts.groups??"—"} / 实例 ${counts.instances??"—"}`,
+    `错误 ${report.errorCount}，未评估项 ${report.unknownCount}。下方仅展示前20条错误及前10条未评估，完整记录可下载。`,
+    ...report.errors.slice(0,20).map(e=>`${e.path}：${e.message}`),...report.unknowns.slice(0,10).map(e=>`${e.path}：${e.message}`),report.limitation].join("\n");
+  $("downloadBaselineReportBtn").disabled=false;return report;
+}
+
+function downloadBaselineContractReport() {
+  if(!latestBaselineContractReport)return;
+  const url=URL.createObjectURL(new Blob([JSON.stringify(latestBaselineContractReport,null,2)],{type:"application/json"})),link=document.createElement("a");
+  link.href=url;link.download="GoldenDB-基线结构校验报告.json";document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
 function getGtmPlanningModule(data) { return data.reverse ? "reverse" : "business"; }
@@ -7719,6 +7756,7 @@ function markReductionPresetCustom(target) {
 }
 
 function resetForm() {
+  resetBaselineContractAudit();
   for(const module of ["business","reverse"]) gtmPlanningContexts[module]={intent:"new",baseline:null};
   businessTenantSpecs = cloneTenantSpecs(defaultBusinessTenants);
   reverseTenantSpecs = cloneTenantSpecs(defaultReverseTenants);
@@ -7737,6 +7775,7 @@ function resetForm() {
 function bindParameterEvents() {
   const inputPanel = document.querySelector(".input-panel");
   const handleParameterChange = (event) => {
+    if(event.target.id==="baselineContractFile")return;
     if(event.target.id==="planningPurpose") {gtmPlanningContexts[$("designModule").value].intent=event.target.value==="new"?"new":"expansion";render();return;}
     // A hidden field can emit its final change event after switching modules.
     const section = event.target.closest(".parameter-section");
@@ -8014,6 +8053,8 @@ function normalizeTenantOrder(specs) {
 
 $("copyBtn").addEventListener("click", copySummary);
 $("resetBtn").addEventListener("click", resetForm);
+$("baselineContractFile").addEventListener("change",event=>checkBaselineContractFile(event.target.files[0]));
+$("downloadBaselineReportBtn").addEventListener("click",downloadBaselineContractReport);
 $("captureGtmBaselineBtn").addEventListener("click",captureGtmComparisonBaseline);
 $("clearGtmBaselineBtn").addEventListener("click",()=>{gtmPlanningContexts[$("designModule").value].baseline=null;render();});
 $("exportGtmComparisonBtn").addEventListener("click",exportGtmComparisonRecord);

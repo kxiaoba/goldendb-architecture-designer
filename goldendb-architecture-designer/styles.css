@@ -2523,3 +2523,8 @@ a {
 .gtm-planning-controls p { font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
 .gtm-expansion-summary { display:grid; gap:8px; margin:12px 0; font-size:14px; overflow-wrap:anywhere; }
 .gtm-expansion-summary > div { padding:8px; border-left:3px solid #ff6470; color:#ff8891; background:#32181c; }
+
+.baseline-contract-panel { border:1px solid var(--line); padding:12px; margin:12px 0; font-size:12px; line-height:1.6; }
+.baseline-contract-panel summary { cursor:pointer; font-weight:700; }
+.baseline-contract-panel input { max-width:100%; min-width:0; }
+.baseline-contract-result { max-height:360px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; }
