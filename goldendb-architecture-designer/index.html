@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>GoldenDB 架构及组网设计工具</title>
     <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./production-contract.css">
   </head>
   <body>
     <datalist id="instanceCoreTiers">
@@ -600,6 +601,7 @@
           </div>
           <section aria-labelledby="placementDetailsTitle">
             <h3 id="placementDetailsTitle">节点落位与主分布</h3>
+            <div id="productionReview"></div>
             <div id="placementDetails"></div>
           </section>
         </section>
@@ -688,8 +690,11 @@
       </section>
     </main>
 
+    <script src="./leader-balance.js"></script>
     <script src="./expansion-baseline.js"></script>
     <script src="./incremental-constraints.js"></script>
+    <script src="./network-address.js"></script><script src="./inventory-capacity.js"></script><script src="./infrastructure-contract.js"></script><script src="./version-capabilities.js"></script><script src="./component-network.js"></script><script src="./production-contract.js"></script>
+    <script src="./production-contract-ui.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

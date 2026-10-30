@@ -1,0 +1,5 @@
+// Synthetic test declarations, never product support evidence.
+const api=require('../version-capabilities.js');const {fillConnectivity}=require('./connectivity-fixture.cjs');
+const facts=()=>Object.fromEntries(Object.keys(api.RULES).filter(k=>!['platform','network'].includes(k)).map(k=>[k,{testOnly:k,count:1}]));
+function fillCapabilities(m,context){if(!m.connectivity?.links?.length)fillConnectivity(m,context);const capabilityFacts=context?.capabilityFacts||Object.fromEntries((m.capabilities?.claims||[]).filter(c=>!['platform','network'].includes(c.id)).map(c=>[c.id,c.id==='deployment'?c.configuration?.design:c.configuration]));m.capabilities=api.template({capabilityFacts},m.infrastructure,m.topology,m.connectivity);m.capabilities.targetVersion=m.design.targetVersion;for(const c of m.capabilities.claims){c.decision='supported';c.evidenceIds=api.RULES[c.id].categories.map(cat=>m.evidence.find(e=>e.category===cat)?.id).filter(Boolean);c.conditions='合成测试，仅当前绑定配置；不构成厂商支持证据';}return m;}
+module.exports={facts,fillCapabilities};

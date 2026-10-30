@@ -2,6 +2,7 @@
 (function(root){
 'use strict';
 const LIMIT=2000;
+const leaderBalance=root.GoldenDBLeaderBalance||(typeof module==="object"&&module.exports&&typeof require==="function"?require("./leader-balance.js"):null);
 function number(v,name,min=1,max=LIMIT){if(v===''||v===null||typeof v==='boolean'||!Number.isInteger(Number(v))||Number(v)<min||Number(v)>max)throw new Error(name+'须为'+min+'至'+max+'的整数');return Number(v);}
 function normalize(input){
  const c={serverCount:number(input.serverCount,'服务器总数',2,500),maxComponents:number(input.maxComponents,'单机组件上限',1,32),managementReplicas:number(input.managementReplicas,'管理副本数',2,100),opsCn:number(input.opsCn,'专用运维CN数',0,100),shareCn:input.shareCn===true,mixCnGtm:input.mixCnGtm===true,tenants:[]};
@@ -22,12 +23,14 @@ function blocks(c,all,site){const local=all.filter(t=>t.site===site),result=[];f
  for(const ids of sets){const list=local.filter(t=>ids.includes(t.tenant)&&(t.type==='CN'||t.type==='GTM')),label=c.shareCn?'跨租户':ids.join('/');if(c.mixCnGtm)block(label+'CN/GTM池',list);else{block(label+'CN池',list.filter(t=>t.type==='CN'));block(label+'GTM池',list.filter(t=>t.type==='GTM'));}}
  return result;}
 function minHosts(b,cap){const counts=new Map();for(const t of b.list)counts.set(t.group,(counts.get(t.group)||0)+1);return Math.max(Math.ceil(b.list.length/(b.onePerHost?1:cap)),...counts.values());}
+// DN candidate order rotates by Group to avoid packing a tenant into the first host subset.
+// This is an initial-layout heuristic; exact leader feasibility is checked separately.
 // Integral max-flow: group->host capacity one enforces physical-host anti-affinity.
 function pack(block,hosts,cap){
  const grouped=new Map();for(const t of block.list){if(!grouped.has(t.group))grouped.set(t.group,[]);grouped.get(t.group).push(t);}
  const groups=[...grouped.values()],S=0,G=1,H=G+groups.length,T=H+hosts.length,N=T+1,graph=Array.from({length:N},()=>[]);let edges=0;
  function edge(a,b,capacity){const f={to:b,rev:graph[b].length,cap:capacity,initial:capacity},r={to:a,rev:graph[a].length,cap:0,initial:0};graph[a].push(f);graph[b].push(r);return f;}
- const links=groups.map((ts,i)=>{edge(S,G+i,ts.length);return hosts.map((_,h)=>{if(++edges>250000)throw new Error('约束搜索边数超过交互保护预算；结果未评估');return edge(G+i,H+h,1);});});hosts.forEach((_,h)=>edge(H+h,T,block.onePerHost?1:cap));
+ const links=groups.map((ts,i)=>{edge(S,G+i,ts.length);const row=Array(hosts.length);for(let k=0;k<hosts.length;k++){const h=block.name==='DN共享池'?(k+i)%hosts.length:k;if(++edges>250000)throw new Error('约束搜索边数超过交互保护预算；结果未评估');row[h]=edge(G+i,H+h,1);}return row;});hosts.forEach((_,h)=>edge(H+h,T,block.onePerHost?1:cap));
  let flow=0;while(true){const prev=Array(N).fill(null),q=[S];prev[S]=[-1,-1];for(let i=0;i<q.length&&!prev[T];i++)for(let k=0;k<graph[q[i]].length;k++){const e=graph[q[i]][k];if(e.cap>0&&!prev[e.to]){prev[e.to]=[q[i],k];q.push(e.to);}}
  if(!prev[T])break;let v=T;while(v!==S){const [u,k]=prev[v],e=graph[u][k];e.cap--;graph[v][e.rev].cap++;v=u;}flow++;}
  if(flow!==block.list.length)return false;
@@ -69,12 +72,33 @@ function audit(config,hosts){
  for(const t of expected)if(seen.get(t.id)!==1)fail('missing-or-duplicate',t.id);
  if(siteCounts.some(n=>n!==c.serverCount/2))fail('site-count','两机房服务器应各占一半');return result();
 }
+function balancePrimaries(config,hosts){
+ if(!leaderBalance)return {status:'unavailable',applied:false,meaning:'主均衡模块不可用，保持原落位'};
+ if(!audit(config,hosts).passed)return {status:'invalid',applied:false,meaning:'副本结构不完整，未执行均衡'};
+ const hs=hosts.filter(h=>h.site===0&&h.components.some(c=>c.type==='DN'));
+ const groups=config.tenants.flatMap(t=>Array.from({length:t.shards},(_,i)=>{
+  const id=t.id+'-DN-G'+(i+1),candidates=hs.filter(h=>h.components.some(c=>c.group===id));
+  return {id,tenantId:t.id,domainId:'LOCAL-DN',currentHostId:candidates.find(h=>h.components.some(c=>c.group===id&&c.role==='主')).id,candidateHostIds:candidates.map(h=>h.id)};
+ }));
+ const tenantScopes=config.tenants.map(t=>({tenantId:t.id,domainId:'LOCAL-DN',hostIds:hs.map(h=>h.id)}));
+ const report=leaderBalance.solve({hosts:hs.map(h=>({id:h.id,domainId:'LOCAL-DN'})),groups,tenantScopes});
+ if(!report.optimal)return report;
+ const saved=hosts.map(h=>h.components.slice());
+ for(const change of report.changes){const source=hs.find(h=>h.id===change.fromHostId),target=hs.find(h=>h.id===change.toHostId);
+  const i=source.components.findIndex(c=>c.group===change.groupId&&c.role==='主'),j=target.components.findIndex(c=>c.group===change.groupId&&c.role==='从');
+  if(i<0||j<0){hosts.forEach((h,k)=>{h.components=saved[k];});return {...report,status:'rejected',applied:false};}
+  [source.components[i],target.components[j]]=[target.components[j],source.components[i]];
+ }
+ if(!audit(config,hosts).passed){hosts.forEach((h,k)=>{h.components=saved[k];});return {...report,status:'rejected',applied:false};}
+ report.applied=true;return report;
+}
 function plan(input){const config=normalize(input),all=tasks(config),siteBlocks=[0,1].map(i=>blocks(config,all,i));const requirements=siteBlocks.map(bs=>bs.map(b=>({pool:b.name,components:b.list.length,hosts:minHosts(b,config.maxComponents)})));const requiredBySite=requirements.map(rs=>rs.reduce((n,r)=>n+r.hosts,0));const hosts=Array.from({length:config.serverCount},(_,i)=>({id:(i<config.serverCount/2?'A':'B')+'-'+String(i%(config.serverCount/2)+1).padStart(2,'0'),site:i<config.serverCount/2?0:1,pool:'空闲',components:[]}));
- const result={schema:'goldendb-fixed-v1',config,requiredBySite,requiredServers:requiredBySite[0]*2,requirements,hosts,structuralStatus:'未通过',productionStatus:'未评估',warnings:['这是固定数量及物理落位校验，不是性能/容量/生产准入证明。','管理6副本及3+3的仲裁、Team、复制/选主规则需按实际GoldenDB版本由厂商核验；不能直接套普通多数派结论。','业务CN是否可供运维跨租户使用、2个共用运维CN的实际授权/连接方式需核验；本结果仅预留2个独立实例。','未提供CPU/内存/净磁盘/IO/网络/数据量/负载/RPO/RTO，均未评估；机柜与真实交换机/地址由项目补齐。','同城两机房不能覆盖城市级灾害。'],missing:[]};
+ const result={schema:'goldendb-fixed-v1',config,requiredBySite,requiredServers:requiredBySite[0]*2,requirements,hosts,structuralStatus:'未通过',productionStatus:'未评估',warnings:['本结果为新建部署设计；重新规划可能改变DN副本宿主机，不能直接作为已有集群的迁移或变更清单。','这是固定数量及物理落位校验，不是性能/容量/生产准入证明。','管理6副本及3+3的仲裁、Team、复制/选主规则需按实际GoldenDB版本由厂商核验；不能直接套普通多数派结论。','业务CN是否可供运维跨租户使用、2个共用运维CN的实际授权/连接方式需核验；本结果仅预留2个独立实例。','未提供CPU/内存/净磁盘/IO/网络/数据量/负载/RPO/RTO，均未评估；机柜与真实交换机/地址由项目补齐。','同城两机房不能覆盖城市级灾害。'],missing:[]};
  if(requiredBySite.some(n=>n>config.serverCount/2)){result.missing=all.map(t=>t.id);result.audit={passed:false,errors:[{code:'insufficient-hosts',detail:'按当前隔离和密度约束至少需要'+result.requiredServers+'台，不能输出部分落位冒充完整方案。'}]};return result;}
  for(let site=0;site<2;site++){let cursor=0;const local=hosts.filter(h=>h.site===site);siteBlocks[site].forEach((b,i)=>{const hs=local.slice(cursor,cursor+requirements[site][i].hosts);cursor+=hs.length;hs.forEach(h=>h.pool=b.name);if(!pack(b,hs,config.maxComponents))throw new Error('数量下界未能构造完整落位；方案未评估，不能视为可行');});}
+ result.primaryBalance=balancePrimaries(config,hosts);
  result.audit=audit(config,hosts);result.structuralStatus=result.audit.passed?'通过（仅结构）':'未通过';result.summary=Object.fromEntries(['DN','CN','GTM','管理','运维CN'].map(type=>[type,all.filter(t=>t.type===type).length]));result.total=all.length;result.freeHosts=hosts.filter(h=>!h.components.length).length;
  if(!result.freeHosts)result.warnings.push(config.serverCount+'台全部占用，无空闲物理服务器；空组件槽位不等于故障重建或N+1资源。');return result;}
 const defaults={serverCount:60,maxComponents:4,managementReplicas:6,opsCn:2,shareCn:true,mixCnGtm:true,tenants:[24,3,1].map((shards,i)=>({name:'租户'+(i+1),shards,cn:6,dnReplicas:6,gtmReplicas:6}))};
-root.GoldenDBFixed={normalize,plan,audit,defaults};
+root.GoldenDBFixed={normalize,plan,audit,balancePrimaries,defaults};
 })(globalThis);

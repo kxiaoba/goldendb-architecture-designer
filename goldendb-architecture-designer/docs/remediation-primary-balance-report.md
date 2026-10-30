@@ -1,5 +1,7 @@
 # 主分片均衡专项修改与验收
 
+> 历史实现记录：2026-10-28的P01已用有界候选流算法替换此处的局部/跨Group交换；当前规则见leader-balance-algorithm.md与remediation-p01-production-leader.md，下列测试记录仍保留为历史证据。
+
 日期：2026-09-10。基线：master b081c9a。用户确认《修改分片主分布方案》后执行。关联 MP01–MP05、R03/R04；不代表 B4b 或总计划全部关闭。
 
 ## 实现

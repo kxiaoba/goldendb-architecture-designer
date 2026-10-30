@@ -1,0 +1,7 @@
+// Artificial cycle for checker tests only; NEVER a GoldenDB required communication matrix.
+const api=require('../component-network.js');
+const syntheticComponents=hostIds=>hostIds.map((hostId,i)=>({id:'SYNTH-'+i,type:'MGR',tenantId:null,group:'SYNTHETIC-GROUP',role:'test',hostId,zone:String(i)}));
+function fillConnectivity(m,context){const components=context?.components??m.connectivity?.components??[];const x=api.template({components});x.targetVersion=m.design.targetVersion;x.endpoints.forEach(e=>{const c=components.find(c=>c.id===e.componentId);e.interfaceId=m.infrastructure.interfaces.find(i=>i.hostId===c.hostId)?.id??null;});
+ if(components.length===1)x.endpoints.push({id:'EXTERNAL',kind:'external',externalKind:'operations',networkId:m.infrastructure.networks[0]?.id,address:'10.0.255.254',tenantId:null});
+ x.links=Array.from({length:Math.max(x.endpoints.length,m.infrastructure.flows.length)},(_,i)=>{const e=x.endpoints[i%x.endpoints.length];return ({id:'L'+i,sourceEndpointId:e.id,targetEndpointId:x.endpoints[(i+1)%x.endpoints.length].id,flowId:m.infrastructure.flows[i%m.infrastructure.flows.length]?.id,securityEvidenceIds:m.evidence.filter(e=>e.category==='security').map(e=>e.id)});});x.review={coverage:'declared-complete',evidenceIds:m.evidence.filter(e=>['network','versionSupport'].includes(e.category)).map(e=>e.id),conditions:'合成循环连接，仅用于检查器测试，不是GoldenDB通信规范'};m.connectivity=x;return m;}
+module.exports={syntheticComponents,fillConnectivity};

@@ -375,6 +375,7 @@ function syncPlanActionAvailability() {
 function invalidatePlanningResult(messages) {
   $("captureGtmBaselineBtn").disabled=true;$("exportGtmComparisonBtn").disabled=true;
   latestDesignData = null;
+  GoldenDBProductionView.update(null,()=>render());
   const message = `参数未通过，当前方案已失效。${messages.join("；")}`;
   $("planningInputStatus").hidden = false;
   $("planningInputStatus").textContent = message;
@@ -1077,6 +1078,7 @@ function calculateReverse() {
     resourceState,
     scores,
     serverPlan,
+    primaryBalance: serverPlan.primaryBalance,
     futureDataTb,
     storedDataTb,
     storageDemandComplete: tenantPlans.every(tenant => tenant.storageDemandKnown),
@@ -1888,6 +1890,7 @@ function buildBusinessServerSizing(config) {
     memoryDemandGb: Object.values(componentDemands).reduce((sum, demand) => sum + demand.memoryGb, 0),
     ...componentSizing,
     serverPlan,
+    primaryBalance: serverPlan.primaryBalance,
     cnTenantIsolationViolations,
     cnSameTenantHostViolations,
     cnPlacementAudit,
@@ -2391,9 +2394,9 @@ function buildBusinessPhysicalServerPlan(config) {
   placeDnRolesByPool(servers, config);
   placeGtmRolesByPool(servers, config);
   placeManagementRolesByPool(servers, config);
-  balanceDnPrimaryRoles(servers, config);
+  const primaryBalance = balanceDnPrimaryRoles(servers, config);
 
-  return servers.map((server) => {
+  const result = servers.map((server) => {
     const resourceAudit = getServerResourceAudit(server, config);
     return {
       ...server,
@@ -2402,6 +2405,8 @@ function buildBusinessPhysicalServerPlan(config) {
       diskLoad: resourceAudit ? resourceAudit.diskPercent : estimateServerDisk(server, config)
     };
   });
+  result.primaryBalance = primaryBalance;
+  return result;
 }
 
 function getBusinessHostGroups(layout, sizing) {
@@ -2911,75 +2916,77 @@ function getDnTenantIsolationViolations(serverPlan, dnTenantPlacement) {
     .filter((item) => item.tenants.length > 1);
 }
 
+function getDnLeaderScopeHosts(servers, tenant, config, azIndex) {
+  const key=getTenantKey(tenant),policy=config.dnTenantPlacement??config.resourceReduction?.dnTenantPlacement;
+  return servers.filter(h=>h.azIndex===azIndex&&h.tenantPool===getTenantResourcePoolKey(tenant)
+    &&h.componentKeys.includes("dn")&&(policy!=="isolated"||getServerDnTenants(h).every(t=>t===key)));
+}
+
 function balanceDnPrimaryRoles(servers, config) {
-  const countMasters = (server, key) => server.roles.filter(role => {
-    const parsed = parseDnPlacementRole(role);
-    return parsed?.role === "M" && (!key || parsed.tenant === key);
-  }).length;
   const validHost = server => {
     const dn = server.roles.map(parseDnPlacementRole).filter(Boolean);
     const tenants = [...new Set(dn.map(role => role.tenant))];
-    return server.componentKeys.includes("dn")
-      && dn.length <= config.maxDnPerServer
+    return server.componentKeys.includes("dn") && dn.length <= config.maxDnPerServer
       && new Set(dn.map(role => `${role.tenant}:${role.group}`)).size === dn.length
       && (config.dnTenantPlacement !== "isolated" || tenants.length <= 1)
       && tenants.every(key => dn.filter(role => role.tenant === key).length <= config.maxTenantDnPerServer)
       && getServerResourceAudit(server, config)?.withinWatermark === true;
   };
-  const eligibleTenants = config.tenantPlans.filter(tenant => {
+  const eligible = config.tenantPlans.filter(tenant => {
     const key = getTenantKey(tenant);
     return !getDnPlacementIssues({ ...config, reverse: true, serverPlan: servers, tenantPlans: [tenant] }).length
       && servers.filter(server => countTenantDnRoles(server, key)).every(server =>
         server.tenantPool === getTenantResourcePoolKey(tenant) && validHost(server));
   });
-  // Each swap strictly reduces tenant M-count squared, or (on a tie) host M-count squared.
-  // A bounded local search is a planning heuristic, not a workload or global optimum proof.
-  let changed = true, swaps = 0;
-  while (changed && swaps < 2000) {
-    changed = false;
-    for (const tenant of eligibleTenants) {
-      const key = getTenantKey(tenant);
-      for (let azIndex = 0; azIndex < config.azCount; azIndex++) {
-        const hosts = servers.filter(server => server.azIndex === azIndex && countTenantDnRoles(server, key));
-        const targets = [...hosts].sort((a, b) => countMasters(a, key) - countMasters(b, key)
-          || countMasters(a) - countMasters(b) || a.id.localeCompare(b.id));
-        let exchanged = false;
-        for (const sameGroupOnly of [true, false]) {
-          for (const source of [...targets].reverse()) {
-            for (const target of targets) {
-              const delta = countMasters(source, key) - countMasters(target, key);
-              if (source === target || delta < 1 || (delta === 1 && countMasters(source) - countMasters(target) <= 1)) continue;
-              for (let i = 0; i < source.roles.length && !exchanged; i++) {
-                const master = parseDnPlacementRole(source.roles[i]);
-                if (master?.tenant !== key || master.role !== "M") continue;
-                const candidates = target.roles.map((role, index) => ({ role: parseDnPlacementRole(role), index }))
-                  .filter(item => item.role?.tenant === key && item.role.role !== "M"
-                    && (!sameGroupOnly || item.role.group === master.group));
-                for (const { index: j } of candidates) {
-                  [source.roles[i], target.roles[j]] = [target.roles[j], source.roles[i]];
-                  if (validHost(source) && validHost(target)) { exchanged = true; break; }
-                  [source.roles[i], target.roles[j]] = [target.roles[j], source.roles[i]];
-                }
-              }
-              if (exchanged) break;
-            }
-            if (exchanged) break;
-          }
-          if (exchanged) break;
-        }
-        if (exchanged) { changed = true; swaps++; }
-      }
+  const skippedTenants = config.tenantPlans.filter(t=>!eligible.includes(t)).map(getTenantKey);
+  const groups = [], tenantScopes = [], hostIds = new Set();
+  const domain = h => JSON.stringify([h.azIndex,h.tenantPool]);
+  for (const tenant of eligible) {
+    const key = getTenantKey(tenant), domainHosts = new Map();
+    for (let g=1;g<=tenant.shardCount;g++) {
+      const replicas = servers.flatMap(h=>h.roles.map((role,index)=>({host:h,role,index,parsed:parseDnPlacementRole(role)})))
+        .filter(r=>r.parsed?.tenant===key&&r.parsed.group===g);
+      const primary = replicas.find(r=>r.parsed.role==="M");
+      if (!primary) continue;
+      const d=domain(primary.host), candidates=replicas.filter(r=>domain(r.host)===d);
+      groups.push({id:JSON.stringify([key,g]),tenantId:key,domainId:d,currentHostId:primary.host.id,
+        candidateHostIds:candidates.map(r=>r.host.id)});
+      if(!domainHosts.has(d))domainHosts.set(d,getDnLeaderScopeHosts(servers,tenant,config,primary.host.azIndex).map(h=>h.id));
     }
+    for(const [domainId,ids] of domainHosts){tenantScopes.push({tenantId:key,domainId,hostIds:ids});ids.forEach(id=>hostIds.add(id));}
   }
+  if(!globalThis.GoldenDBLeaderBalance)return {status:"unavailable",applied:false,skippedTenants};
+  const included=new Set(groups.map(g=>g.id));
+  const hosts=servers.filter(h=>hostIds.has(h.id)).map(h=>({id:h.id,domainId:domain(h),baseLeaders:h.roles
+    .map(parseDnPlacementRole).filter(r=>r?.role==="M"&&!included.has(JSON.stringify([r.tenant,r.group]))).length}));
+  const report=GoldenDBLeaderBalance.solve({hosts,groups,tenantScopes});
+  report.skippedTenants=skippedTenants;
+  if(!report.optimal)return report;
+  const original=servers.map(h=>h.roles.slice());
+  // Only exchange the initial M/S design labels within the SAME Group and AZ.
+  // Replica host sets, per-host tenant count and demand remain unchanged.
+  for(const change of report.changes){
+    const [tenant,group]=JSON.parse(change.groupId),source=servers.find(h=>h.id===change.fromHostId),target=servers.find(h=>h.id===change.toHostId);
+    const i=source.roles.findIndex(role=>{const r=parseDnPlacementRole(role);return r?.tenant===tenant&&r.group===group&&r.role==="M";});
+    const j=target.roles.findIndex(role=>{const r=parseDnPlacementRole(role);return r?.tenant===tenant&&r.group===group&&r.role!=="M";});
+    if(i<0||j<0){servers.forEach((h,k)=>{h.roles=original[k];});return {...report,status:"rejected",applied:false};}
+    [source.roles[i],target.roles[j]]=[target.roles[j],source.roles[i]];
+  }
+  if(eligible.some(t=>getDnPlacementIssues({...config,reverse:true,serverPlan:servers,tenantPlans:[t]}).length)
+    || servers.filter(h=>report.changes.some(c=>c.fromHostId===h.id||c.toHostId===h.id)).some(h=>!validHost(h))){
+    servers.forEach((h,k)=>{h.roles=original[k];});return {...report,status:"rejected",applied:false};
+  }
+  report.applied=true;return report;
 }
 
 function getDnPrimaryDistribution(data) {
   const servers = getPlanServers(data);
+  const balance = data.reverse ? data.primaryBalance : data.serverSizing?.primaryBalance;
   return data.tenantPlans.flatMap(tenant => {
     const key = getTenantKey(tenant);
     const incomplete = getDnPlacementIssues({ ...data, tenantPlans: [tenant] }).length > 0;
     return getAzNames(data.mode, data.azCount).flatMap((az, azIndex) => {
-      const hosts = servers.filter(server => server.azIndex === azIndex && countTenantDnRoles(server, key))
+      const hosts = getDnLeaderScopeHosts(servers, tenant, data, azIndex)
         .map(server => {
           const roles = server.roles.map(parseDnPlacementRole).filter(role => role?.tenant === key);
           return { id: server.id, totalMasters: server.roles.filter(role => parseDnPlacementRole(role)?.role === "M").length,
@@ -2988,10 +2995,18 @@ function getDnPrimaryDistribution(data) {
         });
       if (!hosts.length) return [];
       const spread = Math.max(...hosts.map(host => host.masters)) - Math.min(...hosts.map(host => host.masters));
-      const status = incomplete ? "未评估：副本落位不完整或目标中心不符"
-        : spread > 1 ? "主角色仍偏斜：当前约束下局部交换未达到均衡，需评审资源与副本布局"
-        : "已落位主机间 M 数差不超过 1（仅计数，不代表负载均衡）";
-      return [{ tenant: key, az, hosts, spread, incomplete, status,
+      const solverUnknown = !balance || ["budget-exceeded","unavailable","invalid","rejected","infeasible"].includes(balance.status)
+        || balance.skippedTenants?.includes(key);
+      const aggregateSpread = balance?.after?.domains.find(d=>d.domainId===JSON.stringify([azIndex,getTenantResourcePoolKey(tenant)]))?.spread ?? null;
+      const evaluationStatus = incomplete || solverUnknown ? "未评估" : spread > 1 || aggregateSpread > 1 ? "提示" : "通过";
+      const solverState = !balance ? "均衡求解状态未记录；" : balance.status === "budget-exceeded" ? "均衡求解预算已用尽，原方案保留；"
+        : ["unavailable","invalid","rejected","infeasible"].includes(balance?.status) ? "均衡检查未完成，原方案保留；"
+        : balance?.skippedTenants?.includes(key) ? "资源或结构条件不足，未执行均衡；"
+        : aggregateSpread > 1 ? `同AZ/池全租户主数差${aggregateSpread}，合计仍偏斜；` : "";
+      const status = solverState + (incomplete ? "未评估：副本落位不完整或目标中心不符"
+        : spread > 1 ? "主角色仍偏斜：同区同Group候选未达到计数目标，需评审副本布局与均衡检查状态"
+        : "同AZ允许DN池主机间 M 数差不超过 1（含0主，仅计数，不代表负载均衡）");
+      return [{ tenant: key, az, hosts, spread, incomplete, status, evaluationStatus, aggregateSpread,
         text: `${displayTenantKey(key, data.tenantPlans)} / ${az}：${hosts.map(host => `${host.id} ${host.masters}M/${host.slaves}S（全租户合计 ${host.totalMasters}M）`).join("；")}。${status}` }];
     });
   });
@@ -3342,9 +3357,9 @@ function buildServerPlan(config) {
   placeDnRolesByPool(servers, config);
   placeGtmRolesByPool(servers, config);
   placeManagementRolesByPool(servers, config);
-  balanceDnPrimaryRoles(servers, config);
+  const primaryBalance = balanceDnPrimaryRoles(servers, config);
 
-  return servers.map((server) => {
+  const result = servers.map((server) => {
     const resourceAudit = getServerResourceAudit(server, config);
     return {
       ...server,
@@ -3353,6 +3368,8 @@ function buildServerPlan(config) {
       diskLoad: resourceAudit ? resourceAudit.diskPercent : estimateServerDisk(server, config)
     };
   });
+  result.primaryBalance = primaryBalance;
+  return result;
 }
 
 function assignReverseHostGroups(servers, layout, sizing, mode, azCount) {
@@ -4281,8 +4298,8 @@ function buildLayoutCandidate(data, layout) {
     allowShardColocation:reduction.allowShardColocation, allowGtmGroupColocation:reduction.allowGtmGroupColocation,
     cnTenantPlacement:reduction.cnTenantPlacement, dnTenantPlacement:reduction.dnTenantPlacement};
   const serverPlan = data.reverse ? buildServerPlan(config) : buildBusinessPhysicalServerPlan(config);
-  return data.reverse ? {...data,componentLayout:layout,componentSizing,serverPlan}
-    : {...data,serverSizing:{...sizing,...componentSizing,componentLayout:layout,serverPlan}};
+  return data.reverse ? {...data,componentLayout:layout,componentSizing,serverPlan,primaryBalance:serverPlan.primaryBalance}
+    : {...data,serverSizing:{...sizing,...componentSizing,componentLayout:layout,serverPlan,primaryBalance:serverPlan.primaryBalance}};
 }
 
 function assessLayoutPlacement(data) {
@@ -4358,6 +4375,51 @@ function renderLayoutFeasibility(data) {
   return `<div class="layout-feasibility"><h4>组件组合与落位核验</h4><p>数量估算与资源总量下界均不保证实例能放入单台服务器；落位检查不代表性能或容灾验证。</p>${getLayoutFeasibilityAudits(data).map(item=>`<p class="${item.status==="落位检查通过"?"":item.selected?"cn-placement-error":""}">${escapeAttr(formatLayoutFeasibility(item))}</p>`).join("")}</div>`;
 }
 
+function getProductionComponents(data,servers){
+ const gtms=new Map(getGtmRolePlacements(data).map(g=>[g.label,g]));
+ return servers.flatMap(h=>h.roles.map(role=>{
+  const dn=parseDnPlacementRole(role),cn=parseCnTenant(role),gtm=gtms.get(role);
+  return {id:JSON.stringify([h.id,role]),type:dn?"DN":cn?"CN":gtm?"GTM":role==="管理节点"?"MGR":"UNKNOWN",tenantId:dn?.tenant??cn??gtm?.tenantName??null,
+   group:dn?dn.tenant+"-DN-G"+dn.group:cn?cn+"-CN":gtm?gtm.groupKey:"MGR",role:dn?.role??role,hostId:h.id,zone:String(h.azIndex)};
+ }));
+}
+
+function getProductionCapabilityFacts(data,servers) {
+  const placements=filter=>servers.flatMap(h=>h.roles.filter(filter).map(role=>({role,hostId:h.id,zone:h.azIndex})));
+  return {
+    deployment:{entry:data.reverse?"reverse":"business",environment:data.environment,mode:data.mode,hostCount:servers.length,zones:[...new Set(servers.map(h=>h.azIndex))]},
+    dn:{tenants:data.tenantPlans.map(t=>({id:getTenantKey(t),distributed:t.isDistributed,shards:t.shardCount,replicas:t.replicasPerShard})),placements:placements(isDnRole)},
+    gtm:{kind:data.gtmBinding.kind,groupCount:data.gtmBinding.groupCount,replicasPerGroup:data.gtmReplicasPerGroup,tenantBindings:takeGtmPlanningSnapshot(data).tenants,placements:placements(isGtmRole)},
+    management:{count:data.managementNodes,roleModel:"管理子组件及选主需按目标版本核验",placements:placements(role=>role==="管理节点")},
+    cn:{tenants:data.tenantPlans.map(t=>({id:getTenantKey(t),count:t.totalCn})),placements:placements(isCnRole)},
+    cohosting:{policy:data.resourceReduction,hosts:servers.map(h=>({id:h.id,roles:[...h.roles].sort()}))},
+    operations:{dedicatedOpsCnCount:0,scope:"此入口未单独规划运维CN；需核验实际运维接入与授权方式"}
+  };
+}
+
+const productionContexts = new WeakMap();
+function getProductionContext(data) {
+  const serialized=JSON.stringify(data);
+  if (productionContexts.get(data)?.serialized!==serialized) {
+    const servers=getPlanServers(data);
+    const blocked=!getPlanRoleIdentityAudit(data).complete || getDnPlacementIssues(data).length>0
+      || servers.some(h=>getServerAuditStatus(h).blocksDeployment)
+      || getCnTenantIsolationViolations(servers,data.resourceReduction.cnTenantPlacement).length>0
+      || getDnTenantIsolationViolations(servers,data.resourceReduction.dnTenantPlacement).length>0
+      || getDnReplicaHostViolations(servers).length>0 || getGtmReplicaHostViolations(servers).length>0
+      || getManagementHostViolations(servers).length>0
+      || (data.environment==="production"&&getCnSameTenantHostViolations(servers).length>0)
+      || getTenantPlanningAudits(data).some(a=>a.error)
+      || getGtmExpansionAudit(data).enabled
+      || (data.reverse && getResourceReductionRedlines(data).length>0);
+    productionContexts.set(data,{serialized,context:{entry:data.reverse?"reverse":"business",structuralStatus:blocked?"blocked":"passed",
+      components:getProductionComponents(data,servers),capabilityFacts:getProductionCapabilityFacts(data,servers),hostIds:servers.map(h=>h.id),demands:servers.map(h=>({id:h.id,complete:h.resourceAudit?.issues?.length===0,cpuPhysicalCores:h.resourceAudit?.used?.cpu??null,memoryValue:h.resourceAudit?.used?.memory??null,diskValue:h.resourceAudit?.used?.disk??null,diskKnown:h.resourceAudit?.diskDemandUnknown===false})),hostZones:servers.map(h=>({id:h.id,zone:String(h.azIndex)})),snapshot:JSON.parse(serialized)}});
+  }
+  return productionContexts.get(data).context;
+}
+function getProductionReport(data) { return GoldenDBProductionView.report(getProductionContext(data)); }
+function getProductionSummary(data) { return GoldenDBProductionContract.summary(getProductionReport(data)); }
+
 function render(options = {}) {
   syncGtmComparisonControls();
   const shouldRenderTenantEditors = options.tenantEditors !== false;
@@ -4392,6 +4454,7 @@ function render(options = {}) {
     return;
   }
   latestDesignData = data;
+  GoldenDBProductionView.update(getProductionContext(data),()=>render({tenantEditors:false}));
   syncGtmComparisonControls();
   $("planningInputStatus").hidden = true;
   $("planningInputStatus").textContent = "";
@@ -4418,6 +4481,7 @@ function render(options = {}) {
     + `<div class="dn-failure-summary">${[...getDnFailureCoverage(data),...getDnTakeoverCapacity(data),...getDnHostPressure(data),...getPerformanceEvidence(data)].map(item=>`<div class="${item.error?"cn-placement-error":""}">${escapeAttr(item.text)}</div>`).join("")}</div>`;
   renderExcelExportSummary(data);
   renderRelationGraph(data);
+  $("formulaOutput").textContent += "\n"+getProductionSummary(data);
 }
 
 function renderTenantEditors() {
@@ -4989,6 +5053,7 @@ function getDisasterText(mode) {
 
 function renderRisks(data) {
   const risks = getDnPlacementIssues(data).map(issue => ["risk-high", issue]);
+  risks.push([getProductionReport(data).status==="阻断"?"risk-high":"risk-mid",getProductionSummary(data)]);
   if(getGtmExpansionAudit(data).enabled) risks.push(["risk-high",getGtmExpansionAudit(data).text]);
   if (data.reverse) risks.push([getReverseScoreSummary(data).blocked?"risk-high":"risk-mid",getReverseScoreSummary(data).text]);
   getTenantPlanningAudits(data).filter(a=>a.status!=="通过").forEach(a=>risks.push([a.error?"risk-high":"risk-mid",a.text]));
@@ -4996,7 +5061,7 @@ function renderRisks(data) {
   (data.centerQuotaAudit || []).filter(site => site.missing).forEach(site => risks.push([
     "risk-high", `${site.az} 主机配额不足：需要 ${site.required} 台，当前 ${site.available} 台，已分配 ${site.assigned} 台；不能借用其他中心主机抵消缺口。`
   ]));
-  getDnPrimaryDistribution(data).filter(item => item.incomplete || item.spread > 1)
+  getDnPrimaryDistribution(data).filter(item => item.evaluationStatus !== "通过")
     .forEach(item => risks.push(["risk-mid", item.text]));
   if (data.reverse) {
     if (data.mode === "local1az" && data.environment === "production") {
@@ -6789,7 +6854,7 @@ function copySummary() {
     `说明：该结果为预评估建议，生产需结合版本手册、厂商评审和 POC 压测。`
   ].join("\n");
 
-  navigator.clipboard?.writeText(`${summary}\n${getGtmExpansionLines(data).join("\n")}\n${getDnPrimaryDistribution(data).map(item => item.text).join("\n")}`).then(() => {
+  navigator.clipboard?.writeText(`${summary}\n${getProductionSummary(data)}\n${getGtmExpansionLines(data).join("\n")}\n${getDnPrimaryDistribution(data).map(item => item.text).join("\n")}`).then(() => {
     $("copyBtn").textContent = "已复制";
     setTimeout(() => {
       $("copyBtn").textContent = "复制摘要";
@@ -7048,6 +7113,7 @@ function buildExcelSheets(data) {
   const redlines = getResourceReductionRedlines(data);
   const identitySummary = getPlanRoleIdentitySummary(data);
   const summaryRows = [
+    ["生产设计门禁",getProductionReport(data).status,getProductionSummary(data)],
     ["实例身份完整性", identitySummary.complete ? "通过" : "未通过", identitySummary.text],
     ["设计模块", data.reverse ? "资源约束反推架构" : "业务场景性能测算", "与当前页面选择一致"],
     ["环境类型", environmentLabels[data.environment], data.environment === "production" ? "按生产反亲和和资源水位校验" : "POC 规则不等同生产上线标准"],
@@ -7065,6 +7131,7 @@ function buildExcelSheets(data) {
     ["红线结论", redlines.length ? `未通过（${redlines.length} 项）` : "通过", redlines.length ? redlines[0] : "当前落位未触发硬红线"]
   ];
   if (data.dnCalibration) summaryRows.push(["DN 性能标定", data.dnCalibration.unit, data.dnCalibration.description]);
+  getProductionReport(data).rows.filter(r=>["inventory-capacity","version-capability","component-network"].includes(r.category)).forEach(r=>summaryRows.push([r.label,r.status,r.detail]));
   getLayoutFeasibilityAudits(data).forEach(item=>summaryRows.push(["组件组合落位核验",item.status,formatLayoutFeasibility(item)]));
   getStorageCapacityAudits(data).forEach(item=>summaryRows.push(["磁盘容量核对 / "+item.component,item.status,item.text]));
   getRecoveryWorkspaceAudits(data).forEach(item=>summaryRows.push(["恢复工作区预算 / "+item.component,item.status,item.text]));
@@ -7240,7 +7307,7 @@ function buildExcelSheets(data) {
   if (data.reverse) riskRows.push(["评分边界",getReverseScoreSummary(data).blocked?"高风险":"提示","整体方案",getReverseScoreSummary(data).text]);
   getTenantPlanningAudits(data).forEach(a=>riskRows.push(["租户规划门禁 / "+a.kind,a.error?"高风险":a.status==="通过"?"通过":a.status==="未评估"?"未评估":"提示",displayTenantKey(a.tenant,data.tenantPlans),a.text]));
   getDnPrimaryDistribution(data).forEach(item => riskRows.push([
-    "主角色分布", item.incomplete || item.spread > 1 ? "提示" : "通过",
+    "主角色分布", item.evaluationStatus,
     `${displayTenantKey(item.tenant, data.tenantPlans)} / ${item.az}`, item.text
   ]));
   const displayedRisks = [...document.querySelectorAll("#riskList li")].map((item) => ({
@@ -7529,6 +7596,7 @@ async function renderElementToPng(target) {
   const staging = document.createElement("div");
   staging.style.cssText = "position:fixed;left:-100000px;top:0;z-index:-1;pointer-events:none;background:#08110f;";
   const layoutClone = target.cloneNode(true);
+  if(latestDesignData){const note=document.createElement("div");note.textContent=getProductionSummary(latestDesignData);note.style.cssText="padding:12px;color:#ffe2a8;background:#263028;line-height:1.6;overflow-wrap:anywhere";layoutClone.prepend(note);}
   if (latestDesignData && (!getPlanRoleIdentityAudit(latestDesignData).complete
     || getPlanServers(latestDesignData).some(server=>getServerAuditStatus(server).blocksDeployment)
     || getTenantPlanningAudits(latestDesignData).some(a=>a.error)
