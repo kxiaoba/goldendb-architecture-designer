@@ -1,5 +1,7 @@
 # GoldenDB 严格审查修复计划与续接记录
 
+- 2026-11-01 P02b3b2b1c2a已知交集/同号资产范围已验证：当前/备选路径共享端口、线缆、归属对象、网络资产和故障域明确展示；同号数据库主机与网络资产冲突阻断，未发现交集不证明独立。5396项最终通过、0失败，九模型及60台212实例/主差≤1保持。源码、证据与续接 `/Users/xiaoba/Documents/Codex/2026-10-25/referenced-chatgpt-conversation-this-is-an/outputs/GoldenDB-P02b3b2b1c2a共享故障域-20261101/checkpoint.json`；见network-shared-risk-v1.md及remediation-p02b3b2b1c2a-shared-risk.md。c2a未整体完成，下一步c2a2统一身份/别名证据/覆盖，再c2b带宽故障容量；b2/b3及其他旧项继续开放。本批新增未提交/推送、未生产认证。前批872b74a已补推并核对origin/master，见前批git-release.json。下文旧批状态为历史记录。
+
 - 2026-11-01 P02b3b2b1c1有限声明快照范围已验证：物理多候选显式单活动选择，当前与候选故障/MTU单独报告，全部当前路径优先计算；选择未知不任选、故障不自动切换。5313项最终通过、0失败，九模型及60台212实例/主差≤1保持。快照、证据与续接 `/Users/xiaoba/Documents/Codex/2026-10-25/referenced-chatgpt-conversation-this-is-an/outputs/GoldenDB-P02b3b2b1c1备选路径-20261101/checkpoint.json`；见network-selection-v1.md及remediation-p02b3b2b1c1-selection.md。下一步c2a共享故障域/跨目录资产别名，再c2b带宽/故障剩余容量；b2/b3、b3a/b3c、R18/V4/S03/Office/P05/P06继续开放。未生产认证，本轮未提交/推送。下文旧批下一步为历史记录，以本条为当前入口。
 
 - 2026-11-01 P02b3b2b1b有限静态范围已验证：逐业务连接/方向包长目标绑定实际计算路径，物理有效IP MTU和配置网络MTU共同约束；已知不足阻断，缺项/未知转换/预算未评估。5245项最终通过、0失败，九模型和60台212实例/主差≤1保持。快照、证据和续接 `/Users/xiaoba/Documents/Codex/2026-10-25/referenced-chatgpt-conversation-this-is-an/outputs/GoldenDB-P02b3b2b1b端到端MTU-20261101/checkpoint.json`；见network-mtu-v1.md与remediation-p02b3b2b1b-flow-mtu.md。下一步b3b2b1c备选链路/共享故障域/带宽故障容量/跨目录资产别名；b2/b3、b3a/b3c、R18/V4/S03/Office/P05/P06继续开放。未生产认证，本轮未提交/推送。下文旧批下一步是历史状态，以本条为当前入口。

@@ -1,5 +1,6 @@
 /* Explicit physical paths and effective IP MTU declarations; no live link or failover proof. */
 (function(root){'use strict';
+const risk=root.GoldenDBSharedRisk||(typeof module==='object'&&module.exports?require('./network-shared-risk.js'):null);
 const ip=root.GoldenDBNetworkAddress||(typeof module==='object'&&module.exports?require('./network-address.js'):null),SCHEMA='goldendb-network-physical-v1';
 const obj=x=>!!x&&typeof x==='object'&&!Array.isArray(x),text=x=>typeof x==='string'&&x.trim().length>0&&x.length<=2048,key=r=>JSON.stringify([r?.kind,r?.id]),mtu=x=>Number.isInteger(x)&&x>=68&&x<=65535;
 function template(){return {schema:SCHEMA,targetVersion:null,switches:[],faultDomains:[],ports:[],bindings:[],cables:[],transits:[],paths:[],selections:[],review:{coverage:'unknown',source:null}};}
@@ -76,12 +77,13 @@ function evaluate(input,context,infra,connections,targetVersion,usedAdjacencyIds
  if(!Array.isArray(usedAdjacencyIds)){unknown('physical-usage','physical','逻辑路径使用集合未提供，不能任取物理路径');return done();}
  let steps=0;
  function assess(id,p,alternative){
-  const start=issues.length,a=adjacencies.get(id),path='physical '+id+(alternative?' / 备选 '+p.id:''),risks=new Set(),values=[],usedPorts=new Set(),segments=[];
+  const start=issues.length,a=adjacencies.get(id),path='physical '+id+(alternative?' / 备选 '+p.id:''),risks=new Set(),values=[],usedPorts=new Set(),segments=[],endpointPortIds=[],resourceSets=Object.fromEntries(['ports','cables','transits','owners','assets','faultDomains'].map(k=>[k,new Set()]));
   const use=(v,label)=>{if(!v)return;if(v.state==='down')err('physical-path-down',path,'物理路径所用端口/链路/交换转发为down：'+label);else if(v.state!=='up')unknown('physical-path-state',path,'物理路径状态未明确：'+label);if(v.mode&&v.mode!=='dedicated-l2')unknown('physical-path-mode',path,'物理端口特殊语义未建模：'+label);if(mtu(v.ipMtuBytes))values.push(v.ipMtuBytes);else unknown('physical-mtu-unknown',path,'有效IP MTU未知：'+label);if(!text(v.source))unknown('physical-path-source',path,'路径资料来源未明确：'+label);if('faultDomainIds'in v){if(!Array.isArray(v.faultDomainIds)||!v.faultDomainIds.length)unknown('physical-domain-unknown',path,'路径故障域未明确：'+label);else for(const d of v.faultDomainIds)risks.add(d);}};
   if(!a||!p)unknown('physical-path-missing',path,'使用的逻辑邻接缺少对应物理路径');
   else if(invalidPaths.has(p.id))unknown('physical-path-invalid',path,'物理路径材料不完整、无效或超过预算');
   else{
    const first=bound.get(key(a.source)),last=bound.get(key(a.target)),network=logical(a.source)?.networkId,n=networks.get(network),family=ip?.prefix(n?.cidr)?.family;
+   for(const b of[first,last])if(b?.portId)endpointPortIds.push(b.portId);
    for(const b of[first,last])if(!b||b.mode!=='one-to-one'||!text(b.source))unknown('physical-endpoint-binding',path,'路径端点的唯一物理绑定未明确');
    if(!mtu(p.requiredIpMtu)||p.packetPolicy!=='no-fragment')unknown('physical-packet-target',path,'无分片IP包目标或适用性未知，不能判定MTU满足');
    if(family===6&&mtu(p.requiredIpMtu)&&p.requiredIpMtu<1280)err('physical-ipv6-target',path,'IPv6有效IP MTU目标低于1280；底层分段/重组不在本模型');
@@ -94,6 +96,8 @@ function evaluate(input,context,infra,connections,targetVersion,usedAdjacencyIds
     if(current!==from.id)err('physical-disconnected',path,'物理路径不连续，不能省略中间端口/设备');
     if(seg.kind==='cable'&&!((e.aPortId===from.id&&e.bPortId===to.id)||(e.bPortId===from.id&&e.aPortId===to.id))||seg.kind==='transit'&&(e.fromPortId!==from.id||e.toPortId!==to.id))err('physical-segment-direction',path,'路径段方向或线缆端口不对应');
     if(from.networkId!==network||to.networkId!==network)err('physical-path-network',path,'路径跨网段，不能省略VLAN/隧道等转换');
+    resourceSets[seg.kind==='cable'?'cables':'transits'].add(e.id);
+    for(const v of[from,to]){resourceSets.ports.add(v.id);resourceSets.owners.add(key(v.owner));const asset=v.owner?.kind==='router'?devices.get(v.owner.id)?.assetId:v.owner?.kind==='switch'?switches.get(v.owner.id)?.assetId:null;if(text(asset))resourceSets.assets.add(asset);}
     for(const v of[from,to])if(!usedPorts.has(v.id)){use(v,v.id);usedPorts.add(v.id);if(v.owner?.kind==='switch'){const sw=switches.get(v.owner.id);if(!text(sw?.source))unknown('physical-path-source',path,'交换设备来源未知');if(!Array.isArray(sw?.faultDomainIds)||!sw.faultDomainIds.length)unknown('physical-domain-unknown',path,'交换设备故障域未明确');else for(const d of sw.faultDomainIds)risks.add(d);}}
     use(e,e.id);segments.push(seg.kind+':'+e.id+' '+from.id+'→'+to.id);current=to.id;if(visited.has(current))err('physical-loop',path,'物理路径重复到访端口：'+current);visited.add(current);
    }
@@ -103,7 +107,7 @@ function evaluate(input,context,infra,connections,targetVersion,usedAdjacencyIds
    if(family===6&&minimum!==null&&minimum<1280)err('physical-ipv6-minimum',path,'路径有效IP MTU低于IPv6的1280要求；未建模底层适配');
   }
   const local=issues.slice(start),status=local.some(i=>i.severity==='error')?'阻断':local.length?'未评估':'声明物理路径待实测';
-  rows.push({category:alternative?'network-physical-alternative':'network-physical',label:(alternative?'备选物理路径 / '+p.id+' / ':'物理路径 / ')+id,status,detail:'已知最小有效IP MTU：'+(values.length?Math.min(...values)+' B':'未知')+'；目标：'+(p?.requiredIpMtu??'未知')+' B；路径：'+segments.join(' | ')+'；故障域：'+[...risks].join(',')+'。已知最小值非完整实测PMTU；故障域列表不证明双链路独立或切换成功',adjacencyId:id,pathId:p?.id??null,selected:!alternative&&!!p,knownMinimumIpMtu:values.length?Math.min(...values):null,networkId:logical(a?.source)?.networkId??null,networkMtu:networks.get(logical(a?.source)?.networkId)?.mtu??null,faultDomainIds:[...risks],segments});
+  rows.push({category:alternative?'network-physical-alternative':'network-physical',label:(alternative?'备选物理路径 / '+p.id+' / ':'物理路径 / ')+id,status,detail:'已知最小有效IP MTU：'+(values.length?Math.min(...values)+' B':'未知')+'；目标：'+(p?.requiredIpMtu??'未知')+' B；路径：'+segments.join(' | ')+'；故障域：'+[...risks].join(',')+'。已知最小值非完整实测PMTU；故障域列表不证明双链路独立或切换成功',adjacencyId:id,pathId:p?.id??null,selected:!alternative&&!!p,knownMinimumIpMtu:values.length?Math.min(...values):null,networkId:logical(a?.source)?.networkId??null,networkMtu:networks.get(logical(a?.source)?.networkId)?.mtu??null,faultDomainIds:[...risks],segments,endpointPortIds,resources:Object.fromEntries(Object.entries(resourceSets).map(([k,v])=>[k,[...(k==='faultDomains'?risks:v)].sort()]))});
   if(alternative){const found=issues.splice(start);alternativeIssues.push(...found.map(i=>({...i,adjacencyId:id,pathId:p.id})));rows[rows.length-1].detail+='；备选诊断：'+(found.length?found.map(i=>i.message).join('；'):'声明检查未发现问题，仍待实测')+'；仅备选单路径检查，不参与当前路径结论；不能证明自动切换、故障域独立或容量满足';}
  }
  const used=[...new Set(usedAdjacencyIds)];
@@ -114,6 +118,7 @@ function evaluate(input,context,infra,connections,targetVersion,usedAdjacencyIds
   if(list.length>1||selection)rows.push({category:'network-path-selection',label:'物理路径选择 / '+id,status:active?'声明单活动路径待实测':'未评估',detail:'当前路径：'+(active?.id??'未知')+'；候选：'+list.map(p=>p.id).join(',')+'；选择来源：'+(selection?.source??'单一路径')+'。未模拟自动切换、STP/LAG/ECMP或故障后重选',adjacencyId:id,activePathId:active?.id??null,candidatePathIds:list.map(p=>p.id)});
   for(const p of list)if(p!==active)assess(id,p,true);
  }
+ if(risk)rows.push(...risk.compare(rows));else unknown('shared-risk-module','physical','共享风险检查模块未加载');
  return done();
 }
 const api={SCHEMA,template,evaluate};root.GoldenDBNetworkPhysical=api;if(typeof module==='object'&&module.exports)module.exports=api;

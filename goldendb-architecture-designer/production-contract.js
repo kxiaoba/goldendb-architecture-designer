@@ -4,6 +4,7 @@
 const infrastructure=root.GoldenDBInfrastructure||(typeof module==='object'&&module.exports?require('./infrastructure-contract.js'):null);
 const capabilities=root.GoldenDBVersionCapabilities||(typeof module==='object'&&module.exports?require('./version-capabilities.js'):null);
 const connectivity=root.GoldenDBComponentNetwork||(typeof module==='object'&&module.exports?require('./component-network.js'):null);
+const risk=root.GoldenDBSharedRisk||(typeof module==='object'&&module.exports?require('./network-shared-risk.js'):null);
 const SCHEMA='goldendb-production-review-v1';
 const CATEGORIES=Object.freeze({versionSupport:'版本与组件支持',inventory:'物理库存与故障域',network:'网络与访问控制',capacity:'正常及故障容量',ha:'复制选主与容灾',backupRestore:'备份与恢复',security:'安全与授权',operations:'监控与运维',cutover:'部署割接与回退',acceptance:'环境验收与审批'});
 const LIMIT=4*1024*1024;
@@ -107,6 +108,7 @@ function evaluate(input,context,now=new Date().toISOString()){
   const local=issues.slice(start);rows.push({id:e.id,category:e.category,label:CATEGORIES[e.category],status:local.some(x=>x.severity==='error')?'阻断':local.length?'未评估':'待独立核验',source:e.source??null});
  });
  for(const category of Object.keys(CATEGORIES))if(!seen.has(category)){missing('evidence '+category,'缺少'+CATEGORIES[category]+'材料');rows.push({category,label:CATEGORIES[category],status:'未评估',source:null});}
+ if(risk){const extra=risk.auditAssets(input.topology,input.connectivity);for(const issue of extra.issues)add(issue.severity,issue.code,'$.assets.'+issue.path,issue.message);rows.push(...extra.rows);}else missing('$.assets','跨目录物理资产检查模块未加载');
  if(!infrastructure)missing('$.infrastructure','库存网络检查模块未加载');
  else {const extra=infrastructure.evaluate(input.infrastructure,context,d.targetVersion);for(const issue of extra.issues)add(issue.severity,issue.code,'$.infrastructure.'+issue.path,issue.message);rows.push({category:'infrastructure',label:'库存与双栈网络结构',status:extra.status,source:null});for(const row of extra.capacityRows||[])rows.push({category:'inventory-capacity',label:'实际库存容量 / '+row.hostId,status:row.status,detail:row.detail,source:null});}
  if(!capabilities)missing('$.capabilities','版本能力检查模块未加载');

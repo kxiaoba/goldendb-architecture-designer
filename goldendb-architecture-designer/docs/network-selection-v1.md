@@ -53,3 +53,8 @@
 ## 参考与设计判断
 
 参考 [Batfish项目的可靠性检查目标](https://github.com/batfish/batfish)及[转发分析文档](https://github.com/batfish/batfish/blob/master/docs/forwarding_analysis/README.md)：故障条件、完整路径和多候选分析需明确建模。本工具独立实现有限声明检查，不具备Batfish完整数据平面或符号验证能力。采用显式选择、未知不猜测、当前与候选分开报告是本项目的实现决策。
+
+
+## 2026-11-01 已知共享风险与同号资产补充（P02b3b2b1c2a）
+
+详见 [network-shared-risk-v1.md](network-shared-risk-v1.md)。路径遍历结果增加分类型资源集合及共同端点标记，当前与候选比较已知交集，未发现共享仍不证明独立。主机physicalId与网络assetId同号冲突阻断独立资源模型；不同编号的别名、故障域统一身份和覆盖仍待c2a2。中文界面及实际导出同步；未改变落位、数量和主均衡。当前1:1接口绑定下中间路径多样性不能证明端点故障保护。c2a只完成有限范围，之后仍需c2b容量及b3完整故障场景/实测。

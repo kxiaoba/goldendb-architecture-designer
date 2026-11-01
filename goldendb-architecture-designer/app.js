@@ -7131,7 +7131,7 @@ function buildExcelSheets(data) {
     ["红线结论", redlines.length ? `未通过（${redlines.length} 项）` : "通过", redlines.length ? redlines[0] : "当前落位未触发硬红线"]
   ];
   if (data.dnCalibration) summaryRows.push(["DN 性能标定", data.dnCalibration.unit, data.dnCalibration.description]);
-  getProductionReport(data).rows.filter(r=>["inventory-capacity","version-capability","component-network","service-listener","network-path","network-fabric","network-hop","network-physical","network-mtu","network-physical-alternative","network-path-selection"].includes(r.category)).forEach(r=>summaryRows.push([r.label,r.status,r.detail]));
+  getProductionReport(data).rows.filter(r=>["inventory-capacity","version-capability","component-network","service-listener","network-path","network-fabric","network-hop","network-physical","network-mtu","network-physical-alternative","network-path-selection","network-shared-risk","network-asset-identity"].includes(r.category)).forEach(r=>summaryRows.push([r.label,r.status,r.detail]));
   getLayoutFeasibilityAudits(data).forEach(item=>summaryRows.push(["组件组合落位核验",item.status,formatLayoutFeasibility(item)]));
   getStorageCapacityAudits(data).forEach(item=>summaryRows.push(["磁盘容量核对 / "+item.component,item.status,item.text]));
   getRecoveryWorkspaceAudits(data).forEach(item=>summaryRows.push(["恢复工作区预算 / "+item.component,item.status,item.text]));
