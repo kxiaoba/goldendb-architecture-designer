@@ -1,10 +1,12 @@
 /* Declared endpoint/flow consistency only. No inferred full mesh or packet forwarding proof. */
 (function(root){'use strict';
 const addresses=root.GoldenDBNetworkAddress||(typeof module==='object'&&module.exports?require('./network-address.js'):null);
+const services=root.GoldenDBServiceListeners||(typeof module==='object'&&module.exports?require('./service-listeners.js'):null);
+const routing=root.GoldenDBNetworkRouting||(typeof module==='object'&&module.exports?require('./network-routing.js'):null);
 const SCHEMA='goldendb-component-network-v1',TYPES=['CN','DN','GTM','MGR','OPS'];
 const object=x=>!!x&&typeof x==='object'&&!Array.isArray(x),text=x=>typeof x==='string'&&x.trim().length>0&&x.length<=2048;
 function canonical(x){if(x===null||typeof x==='string'||typeof x==='boolean')return JSON.stringify(x);if(typeof x==='number'&&Number.isFinite(x))return JSON.stringify(x);if(Array.isArray(x)){if(Object.keys(x).length!==x.length)throw Error('sparse');return '['+x.map(canonical).join(',')+']';}if(object(x))return '{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+canonical(x[k])).join(',')+'}';throw Error('invalid');}
-function template(context){const components=JSON.parse(canonical(context?.components??[]));return {schema:SCHEMA,targetVersion:null,components,endpoints:components.map((c,i)=>({id:'EP'+(i+1),kind:'component',componentId:c.id,interfaceId:null})),links:[],review:{coverage:'unknown',evidenceIds:[],conditions:null}};}
+function template(context){const components=JSON.parse(canonical(context?.components??[]));return {schema:SCHEMA,targetVersion:null,components,endpoints:components.map((c,i)=>({id:'EP'+(i+1),kind:'component',componentId:c.id,interfaceId:null})),links:[],routing:routing?routing.template():null,services:services?services.template():null,review:{coverage:'unknown',evidenceIds:[],conditions:null}};}
 function evaluate(input,context,infra,targetVersion,evidence){
  const issues=[],rows=[],add=(severity,code,path,message)=>issues.push({severity,code,path,message});let mapped=0,participating=0,total=0;
  const done=()=>({status:issues.some(i=>i.severity==='error')?'阻断':issues.length?'未评估':'声明对应一致待实测',canDeploy:false,issues,rows,counts:{components:total,mapped,participating},limitation:'仅检查已声明组件/端点/连接的对应与参与；不能证明厂商所需连接齐全、监听端口、路由可达或实际授权。'});
@@ -17,7 +19,7 @@ function evaluate(input,context,infra,targetVersion,evidence){
  const components=index(context.components,'$context.components');total=components.size;
  for(const c of components.values())if(!TYPES.includes(c.type)||!text(c.hostId)||!context.hostIds?.includes(c.hostId)||!text(c.zone)||!text(c.group)||!text(c.role)||!(c.tenantId===null||text(c.tenantId))||(['CN','DN'].includes(c.type)&&!text(c.tenantId)))error('connection-context',c.id,'组件类型、宿主机、租户/Group、角色或站点无效');
  if(input==null){unknown('connection-missing','$','尚未提供组件连接矩阵；网段端口允许不等于组件通信关系完整');rows.push({category:'component-network',label:'组件连接矩阵',status:'未评估',detail:'当前'+total+'个组件尚未绑定通信端点和连接'});return done();}
- if(!fields(input,['schema','targetVersion','components','endpoints','links','review'],'$'))return done();
+ if(!fields(input,['schema','targetVersion','components','endpoints','links','review','services','routing'],'$'))return done();
  if(input.schema!==SCHEMA)error('connection-schema','$','不支持此连接材料版本');
  if(!text(input.targetVersion)||!text(targetVersion))unknown('connection-version','$','缺少明确目标版本/补丁');else if(input.targetVersion!==targetVersion)error('connection-version','$','连接资料与目标版本不符');
  if(!Array.isArray(input.components))error('connection-catalog','$.components','缺少绑定的组件目录');else if(canonical(input.components)!==canonical(context.components))error('connection-catalog','$.components','组件身份/角色/租户/组/宿主机或站点已变化，不能沿用旧连接矩阵');
@@ -83,6 +85,8 @@ function evaluate(input,context,infra,targetVersion,evidence){
   if(!participates)unknown('component-uncovered',c.id,'当前组件未出现在有效声明连接中，不能由其他组件端口开放推断通信覆盖');
   rows.push({category:'component-network',label:'组件连接 / '+c.id,status:mapped&&participates?'已声明参与待实测':'未评估',detail:c.type+'；租户'+(c.tenantId??'共享/集群')+'；组'+c.group+'；主机'+c.hostId+'；仅引用与参与检查，不证明所需连接齐全或实际可达'});
  }
+ if(services){const r=services.evaluate(input.services,context,infra,input,targetVersion);issues.push(...r.issues);rows.push(...r.rows);}else unknown('listener-module','services','监听检查模块未加载');
+ if(routing){const r=routing.evaluate(input.routing,context,infra,input,targetVersion);issues.push(...r.issues);rows.push(...r.rows);}else unknown('routing-module','routing','路由检查模块未加载');
  return done();
 }
 const api={SCHEMA,template,evaluate};root.GoldenDBComponentNetwork=api;if(typeof module==='object'&&module.exports)module.exports=api;

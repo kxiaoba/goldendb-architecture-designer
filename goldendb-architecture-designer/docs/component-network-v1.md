@@ -17,6 +17,8 @@ tenantId=null表示集群/共享组件，不能视为天然拥有跨租户权限
 |endpoints：component|id、kind=component、componentId、interfaceId；接口必须属于组件实际宿主机；同组件/接口不重复登记|
 |endpoints：external|id、kind=external、externalKind、networkId、address、tenantId；外部类型限application/load-balancer/backup/monitoring/operations；地址族与范围符合已声明网段|
 |links|id、sourceEndpointId、targetEndpointId、flowId、securityEvidenceIds；方向、协议/目标端口/用途取自被引用的infrastructure.flows|
+|routing|P02b3b1新增有效目的路由及往返绑定，详见network-routing-v1.md；不证明实际转发|
+|services|P02b3a新增监听及入向对应材料，详见service-listeners-v1.md；缺项未评估|
 |review|coverage=unknown或declared-complete；evidenceIds引用network及versionSupport类别；conditions说明资料章节、范围、限制和未覆盖项|
 
 每类列表最多5000项，证据引用每处最多30项；外层仍限制4MiB。缺字段不猜测，重复/非法/未建模字段明确诊断。数组顺序保留，JSON对象键序不影响比较。
@@ -51,9 +53,9 @@ tenantId=null表示集群/共享组件，不能视为天然拥有跨租户权限
 
 “一条有效连接”不是完整通信清单。没有目标版本通信规范，就不能知道还漏了哪些特定CN→DN、CN→GTM、复制、管理、备份或故障切换关系。测试中的循环图只是合成反例，不是GoldenDB建议组网。
 
-流量目标端口也不是已核验的进程监听端口。本批未检查同机实例监听冲突、绑定地址、端口占用、网络命名空间/容器、真实端口转发。4组件/台不等于4个进程一定能同时启动。
+流量目标端口不是已实测的进程监听端口。P02b3a已增加host直接监听声明、同机冲突及入向匹配检查，见service-listeners-v1.md；运行时占用、容器隔离/转发和完整进程清单仍待核验。4组件/台不等于4个进程一定能同时启动。
 
-实际路由、跨VRF、交换机/链路冗余、端到端MTU、LB/VIP/NAT、动态端口、返回流/连接跟踪、设备规则顺序和真实账号权限仍待P02b3。网段级ACL允许也不等于实际防火墙已配置、目的进程已监听。canDeploy=false保持。
+P02b3b1已增加声明有效目的路由和往返对应；实际逐跳转发、跨VRF、交换机/链路冗余、端到端MTU、LB/VIP/NAT、动态端口、返回流/连接跟踪、设备规则顺序和真实账号权限仍待P02b3。网段级ACL允许也不等于实际防火墙已配置、目的进程已监听。canDeploy=false保持。
 
 ## 依据与验证
 
