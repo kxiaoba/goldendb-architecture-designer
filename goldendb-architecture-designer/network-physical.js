@@ -3,14 +3,14 @@
 const risk=root.GoldenDBSharedRisk||(typeof module==='object'&&module.exports?require('./network-shared-risk.js'):null);
 const ip=root.GoldenDBNetworkAddress||(typeof module==='object'&&module.exports?require('./network-address.js'):null),SCHEMA='goldendb-network-physical-v1';
 const obj=x=>!!x&&typeof x==='object'&&!Array.isArray(x),text=x=>typeof x==='string'&&x.trim().length>0&&x.length<=2048,key=r=>JSON.stringify([r?.kind,r?.id]),mtu=x=>Number.isInteger(x)&&x>=68&&x<=65535;
-function template(){return {schema:SCHEMA,targetVersion:null,switches:[],faultDomains:[],ports:[],bindings:[],cables:[],transits:[],paths:[],selections:[],review:{coverage:'unknown',source:null}};}
+function template(){return {schema:SCHEMA,targetVersion:null,switches:[],faultDomains:[],ports:[],bindings:[],cables:[],transits:[],paths:[],selections:[],identities:null,review:{coverage:'unknown',source:null}};}
 function evaluate(input,context,infra,connections,targetVersion,usedAdjacencyIds){
  const issues=[],rows=[],alternativeIssues=[],add=(severity,code,path,message)=>issues.push({severity,code,path,message}),err=(c,p,m)=>add('error',c,p,m),unknown=(c,p,m)=>add('unknown',c,p,m);
  const done=()=>({issues,rows,alternativeIssues,status:issues.some(i=>i.severity==='error')?'阻断':issues.length?'未评估':'声明物理路径待实测',canDeploy:false});
  if(input==null){unknown('physical-missing','physical','缺少物理端口、链路与MTU资料，逻辑邻接不能替代物理路径');rows.push({category:'network-physical',label:'物理链路与MTU',status:'未评估',detail:'缺少实际端口、线缆、交换转发及有效IP MTU资料'});return done();}
  const fields=(x,keys,p)=>{if(!obj(x)){err('physical-type',p,'应为对象');return false;}for(const k of Object.keys(x))if(!keys.includes(k))err('physical-field',p+'.'+k,'未建模字段，不得隐含参与物理转发');return true;};
  const index=(a,p,max=5000)=>{const m=new Map();if(!Array.isArray(a)||a.length>max){err('physical-list',p,'须为最多'+max+'项清单');return m;}for(const v of a){if(!obj(v)||!text(v.id)){err('physical-id',p,'ID无效');continue;}if(m.has(v.id))err('physical-duplicate',p,'ID重复：'+v.id);else m.set(v.id,v);}return m;};
- if(!fields(input,['schema','targetVersion','switches','faultDomains','ports','bindings','cables','transits','paths','selections','review'],'physical'))return done();
+ if(!fields(input,['schema','targetVersion','switches','faultDomains','ports','bindings','cables','transits','paths','selections','identities','review'],'physical'))return done();
  if(input.schema!==SCHEMA)err('physical-schema','physical','物理路径材料版本不支持');if(!text(input.targetVersion)||!text(targetVersion))unknown('physical-version','physical','缺少目标版本');else if(input.targetVersion!==targetVersion)err('physical-version','physical','物理资料与目标版本不一致');
  if(fields(input.review,['coverage','source'],'physical.review')){if(input.review.coverage==='unknown')unknown('physical-coverage','physical.review','物理清单完整性未明确');else if(input.review.coverage!=='declared-complete')err('physical-coverage','physical.review','仅允许unknown/declared-complete');if(!text(input.review.source))unknown('physical-source','physical.review','缺少资料来源');}
  const fabric=connections?.routing?.fabric;if(!fabric){unknown('physical-fabric-missing','physical','尚无可对应的逻辑设备邻接');return done();}
@@ -118,7 +118,7 @@ function evaluate(input,context,infra,connections,targetVersion,usedAdjacencyIds
   if(list.length>1||selection)rows.push({category:'network-path-selection',label:'物理路径选择 / '+id,status:active?'声明单活动路径待实测':'未评估',detail:'当前路径：'+(active?.id??'未知')+'；候选：'+list.map(p=>p.id).join(',')+'；选择来源：'+(selection?.source??'单一路径')+'。未模拟自动切换、STP/LAG/ECMP或故障后重选',adjacencyId:id,activePathId:active?.id??null,candidatePathIds:list.map(p=>p.id)});
   for(const p of list)if(p!==active)assess(id,p,true);
  }
- if(risk)rows.push(...risk.compare(rows));else unknown('shared-risk-module','physical','共享风险检查模块未加载');
+ if(risk){const identities=risk.resolveIdentities(input.identities,context,connections,targetVersion);issues.push(...identities.issues);rows.push(...identities.rows,...risk.compare(rows,identities));}else unknown('shared-risk-module','physical','共享风险检查模块未加载');
  return done();
 }
 const api={SCHEMA,template,evaluate};root.GoldenDBNetworkPhysical=api;if(typeof module==='object'&&module.exports)module.exports=api;
